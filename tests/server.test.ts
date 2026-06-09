@@ -158,4 +158,21 @@ describe('Express server', () => {
       expect(res.body.model).toBeTruthy();
     });
   });
+
+  describe('security headers', () => {
+    it('sets baseline headers on every response', async () => {
+      const res = await request(app).get('/health');
+      expect(res.headers['x-content-type-options']).toBe('nosniff');
+      expect(res.headers['x-frame-options']).toBe('DENY');
+      expect(res.headers['referrer-policy']).toBe('no-referrer');
+      expect(res.headers['x-powered-by']).toBeUndefined();
+    });
+
+    it('sets a strict CSP on the dashboard', async () => {
+      const res = await request(app).get('/dashboard');
+      expect(res.headers['content-security-policy']).toContain("default-src 'none'");
+      expect(res.headers['content-security-policy']).toContain("connect-src 'self'");
+      expect(res.headers['content-security-policy']).toContain("frame-ancestors 'none'");
+    });
+  });
 });

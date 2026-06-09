@@ -57,6 +57,12 @@ export function registerWebhookHandlers(): void {
 
   app.webhooks.on('pull_request.closed', async ({ payload, id }) => {
     if (!payload.pull_request.merged) return;
+
+    const installationId = payload.installation?.id;
+    if (!installationId) {
+      logger.warn(`Webhook ${id}: pull_request.closed without installation id, ignoring`);
+      return;
+    }
     metrics.webhookEvents.inc({ event: 'pull_request.merged' });
 
     const event: MergedPREvent = {
@@ -66,7 +72,7 @@ export function registerWebhookHandlers(): void {
       baseRef: payload.pull_request.base.ref,
       repoOwner: payload.repository.owner.login,
       repoName: payload.repository.name,
-      installationId: payload.installation?.id ?? 0,
+      installationId,
       mergedAt: payload.pull_request.merged_at ?? new Date().toISOString(),
       mergedBy: payload.pull_request.merged_by?.login ?? 'unknown',
     };
@@ -85,11 +91,16 @@ export function registerWebhookHandlers(): void {
 
     metrics.webhookEvents.inc({ event: `command.${command.cmd}` });
 
+    const installationId = payload.installation?.id;
+    if (!installationId) {
+      logger.warn('issue_comment command without installation id, ignoring');
+      return;
+    }
+
     const owner = payload.repository.owner.login;
     const repo = payload.repository.name;
     const prNumber = payload.issue.number;
     const username = payload.comment.user?.login ?? 'unknown';
-    const installationId = payload.installation?.id ?? 0;
 
     logger.info(`Command /ai-merge ${command.cmd} on ${owner}/${repo}#${prNumber} from @${username}`);
 

@@ -14,6 +14,7 @@ export const config = {
     nodeEnv: 'test',
     dashboardToken: '',
     rateLimitPerMinute: 300,
+    trustProxy: false,
   },
   settings: {
     autoMergeOnCIPass: false,

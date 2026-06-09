@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import express from 'express';
 import { registerWebhookHandlers, handleWebhook } from './handlers/webhook';
 import { getQueueStats, isQueueEnabled } from './services/queue';
@@ -65,6 +66,13 @@ function requestLogger(): express.RequestHandler {
   };
 }
 
+/** Constant-time string comparison (hash first so lengths never leak). */
+function safeEqual(a: string, b: string): boolean {
+  const ha = crypto.createHash('sha256').update(a).digest();
+  const hb = crypto.createHash('sha256').update(b).digest();
+  return crypto.timingSafeEqual(ha, hb);
+}
+
 /** Optional bearer-token gate for observability endpoints. Active when DASHBOARD_TOKEN is set. */
 function observabilityAuth(): express.RequestHandler {
   return (req, res, next) => {
@@ -72,8 +80,37 @@ function observabilityAuth(): express.RequestHandler {
     if (!token) return next();
     const header = req.headers.authorization;
     const presented = header?.startsWith('Bearer ') ? header.slice(7) : (req.query.token as string | undefined);
-    if (presented === token) return next();
+    if (typeof presented === 'string' && safeEqual(presented, token)) return next();
     res.status(401).json({ error: 'Unauthorized — set Authorization: Bearer <DASHBOARD_TOKEN> or ?token=' });
+  };
+}
+
+/**
+ * Baseline security headers on every response, plus a strict CSP for the
+ * dashboard (its only script/style are inline; it talks to /api/* on the
+ * same origin and loads no external resources).
+ */
+function securityHeaders(): express.RequestHandler {
+  const DASHBOARD_CSP = [
+    "default-src 'none'",
+    "script-src 'unsafe-inline'",
+    "style-src 'unsafe-inline'",
+    "connect-src 'self'",
+    "img-src 'self' data:",
+    "base-uri 'none'",
+    "form-action 'none'",
+    "frame-ancestors 'none'",
+  ].join('; ');
+
+  return (req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+    if (req.path === '/dashboard') {
+      res.setHeader('Content-Security-Policy', DASHBOARD_CSP);
+    }
+    next();
   };
 }
 
@@ -82,8 +119,11 @@ function observabilityAuth(): express.RequestHandler {
 export function createApp(): express.Application {
   const app = express();
   app.disable('x-powered-by');
-  app.set('trust proxy', true);
+  // Spoofable X-Forwarded-For would defeat the per-IP rate limiter — only
+  // trust it when explicitly deployed behind a proxy (TRUST_PROXY=true).
+  app.set('trust proxy', config.server.trustProxy);
 
+  app.use(securityHeaders());
   app.use(requestLogger());
   app.use(rateLimiter());
 

@@ -34,6 +34,12 @@ export const config = {
     dashboardToken: process.env.DASHBOARD_TOKEN || '',
     /** Per-IP request ceiling per minute; <= 0 disables rate limiting. */
     rateLimitPerMinute: intEnv('RATE_LIMIT_PER_MIN', 300),
+    /**
+     * Only set true when running behind a reverse proxy / load balancer.
+     * When false (default), client IPs come from the socket and cannot be
+     * spoofed via X-Forwarded-For — which matters for the rate limiter.
+     */
+    trustProxy: process.env.TRUST_PROXY === 'true',
   },
   settings: {
     autoMergeOnCIPass: process.env.AUTO_MERGE_ON_CI_PASS === 'true',

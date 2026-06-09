@@ -11,6 +11,64 @@ export interface GitContext {
   cleanup: () => Promise<void>;
 }
 
+// ─── Input validation ──────────────────────────────────────────────────────────
+// Owner/repo/branch values originate in webhook payloads and API responses.
+// GitHub already constrains them, but these are the strings we hand to git —
+// enforce our own invariants so a payload can never become a git option
+// (leading '-'), traverse paths ('..'), or smuggle revision syntax ('@{').
+
+const OWNER_REPO_RE = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*)$/;
+
+export function isSafeOwnerOrRepo(value: string): boolean {
+  return value.length > 0 && value.length <= 100 && OWNER_REPO_RE.test(value);
+}
+
+export function isSafeRefName(ref: string): boolean {
+  if (ref.length === 0 || ref.length > 250) return false;
+  if (ref.startsWith('-') || ref.startsWith('/') || ref.endsWith('/')) return false;
+  if (ref.includes('..') || ref.includes('@{') || ref.endsWith('.lock')) return false;
+  // Conservative allow-list of ref characters (git allows more; we don't need it)
+  return /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(ref);
+}
+
+function assertSafeGitInputs(owner: string, repo: string, ...refs: string[]): void {
+  if (!isSafeOwnerOrRepo(owner) || !isSafeOwnerOrRepo(repo)) {
+    throw new Error(`Refusing git operation: suspicious owner/repo "${owner}/${repo}"`);
+  }
+  for (const ref of refs) {
+    if (!isSafeRefName(ref)) {
+      throw new Error(`Refusing git operation: suspicious ref name "${ref}"`);
+    }
+  }
+}
+
+/**
+ * A repo-relative path is only written/read if it cannot escape the workspace:
+ * no absolute paths, no '..' segments, never inside .git. Combined with
+ * core.symlinks=false at clone time (symlinks materialize as plain text
+ * files), this closes the symlink/path-traversal class.
+ */
+export function isSafeRepoPath(filePath: string): boolean {
+  if (filePath.length === 0 || filePath.length > 4096) return false;
+  if (path.isAbsolute(filePath) || filePath.includes('\0')) return false;
+  const segments = filePath.split('/');
+  return segments.every((s) => s !== '' && s !== '.' && s !== '..' && s.toLowerCase() !== '.git');
+}
+
+function resolveInsideRepo(repoDir: string, filePath: string): string {
+  if (!isSafeRepoPath(filePath)) {
+    throw new Error(`Refusing to touch unsafe repo path "${filePath}"`);
+  }
+  const full = path.resolve(repoDir, filePath);
+  const root = path.resolve(repoDir) + path.sep;
+  if (!full.startsWith(root)) {
+    throw new Error(`Path "${filePath}" escapes the workspace`);
+  }
+  return full;
+}
+
+// ─── Workspace lifecycle ───────────────────────────────────────────────────────
+
 export async function cloneRepo(
   repoUrl: string,
   token: string,
@@ -21,20 +79,24 @@ export async function cloneRepo(
 
   logger.debug(`Cloning ${repoUrl} branch ${branch} to ${tmpDir.path}`);
 
-  // SECURITY FIX: pass auth via http.extraHeader config rather than embedding
-  // the token in the URL (which leaks into git reflog and process listings).
+  // Auth via http.extraHeader rather than embedding the token in the URL
+  // (URLs leak into reflog and process listings). core.symlinks=false makes
+  // attacker-supplied symlinks check out as inert text files, so later file
+  // reads/writes can't traverse out of the workspace through them.
   await git.clone(repoUrl, tmpDir.path, [
     '--depth', '50',
     '--branch', branch,
     '--single-branch',
+    '--no-tags',
     '--config', `http.extraHeader=Authorization: token ${token}`,
+    '--config', 'core.symlinks=false',
   ]);
 
   const repoGit = simpleGit(tmpDir.path);
 
   await repoGit.addConfig('user.email', 'ai-auto-merge[bot]@users.noreply.github.com');
   await repoGit.addConfig('user.name', 'ai-auto-merge[bot]');
-  // Keep auth available for the push step
+  // Keep auth available for the fetch/push steps
   await repoGit.addConfig('http.extraHeader', `Authorization: token ${token}`);
 
   return {
@@ -50,12 +112,11 @@ export async function fetchAndMergeBase(
   token: string,
   remoteUrl: string
 ): Promise<{ hasConflicts: boolean; conflictedFiles: string[] }> {
-  // SECURITY FIX: auth via header, not URL
   await ctx.git.addConfig('http.extraHeader', `Authorization: token ${token}`);
   await ctx.git.fetch(remoteUrl, baseBranch);
 
   try {
-    await ctx.git.merge([`FETCH_HEAD`, '--no-commit', '--no-ff']);
+    await ctx.git.merge(['FETCH_HEAD', '--no-commit', '--no-ff']);
     // No conflicts — clean up the in-progress merge state
     await ctx.git.merge(['--abort']).catch(() => {
       // Fast-forward merges have no state to abort, ignore
@@ -69,7 +130,7 @@ export async function fetchAndMergeBase(
   }
 }
 
-// NEW: also handle delete/modify conflicts where one side removed the file.
+// Also handles delete/modify conflicts where one side removed the file.
 export async function getConflictedFileContents(
   ctx: GitContext,
   conflictedFiles: string[]
@@ -77,12 +138,22 @@ export async function getConflictedFileContents(
   const result: ConflictedFile[] = [];
 
   for (const filePath of conflictedFiles) {
-    const fullPath = path.join(ctx.dir, filePath);
+    let fullPath: string;
     try {
-      if (!fs.existsSync(fullPath)) {
+      fullPath = resolveInsideRepo(ctx.dir, filePath);
+    } catch (err) {
+      logger.warn(`Skipping conflicted path: ${err instanceof Error ? err.message : err}`);
+      continue;
+    }
+
+    try {
+      const stat = fs.existsSync(fullPath) ? fs.lstatSync(fullPath) : null;
+      if (!stat) {
         // File was deleted on one side — surface this to Claude with a synthetic marker
         const deletedContent = await getDeleteConflictContent(ctx, filePath);
         result.push({ path: filePath, content: deletedContent, isDeleteConflict: true });
+      } else if (!stat.isFile()) {
+        logger.warn(`Skipping ${filePath}: not a regular file (mode ${stat.mode.toString(8)})`);
       } else {
         const content = fs.readFileSync(fullPath, 'utf-8');
         result.push({ path: filePath, content });
@@ -117,7 +188,7 @@ export async function applyResolutions(
   resolutions: Array<{ path: string; content: string; isDelete?: boolean }>
 ): Promise<void> {
   for (const { path: filePath, content, isDelete } of resolutions) {
-    const fullPath = path.join(ctx.dir, filePath);
+    const fullPath = resolveInsideRepo(ctx.dir, filePath);
     if (isDelete) {
       if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath);
       await ctx.git.rm([filePath]);
@@ -137,7 +208,11 @@ export async function commitAndPush(
   _remoteUrl: string,
   _token: string
 ): Promise<string> {
-  // Auth is already set via http.extraHeader in the repo config — no need to embed in URL
+  if (!isSafeRefName(branch)) {
+    throw new Error(`Refusing to push to suspicious branch name "${branch}"`);
+  }
+  // Auth is already set via http.extraHeader in the repo config; --no-verify
+  // skips any client-side hooks.
   await ctx.git.commit(message, { '--no-verify': null });
   const log = await ctx.git.log({ maxCount: 1 });
   const commitSha = log.latest?.hash || '';
@@ -167,6 +242,8 @@ export async function prepareConflictWorkspace(
   conflictedFiles: ConflictedFile[];
   remoteUrl: string;
 }> {
+  assertSafeGitInputs(repoOwner, repoName, prBranch, baseBranch);
+
   const remoteUrl = `https://github.com/${repoOwner}/${repoName}.git`;
 
   const ctx = await cloneRepo(remoteUrl, token, prBranch);

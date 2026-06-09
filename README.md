@@ -175,6 +175,7 @@ Update your GitHub App's webhook URL with the tunnel URL.
 | `AUTO_MERGE_METHOD` | `SQUASH` | `MERGE`, `SQUASH` or `REBASE` for armed auto-merges |
 | `DASHBOARD_TOKEN` | _unset_ | Bearer token guarding `/dashboard`, `/api/*`, `/metrics` |
 | `RATE_LIMIT_PER_MIN` | `300` | Per-IP request ceiling; `0` disables |
+| `TRUST_PROXY` | `false` | Set `true` only behind a reverse proxy so client IPs come from `X-Forwarded-For` |
 | `REDIS_URL` | _unset_ | When set, enables BullMQ queueing; otherwise bounded in-process fallback |
 | `QUEUE_CONCURRENCY` | `3` | BullMQ worker concurrency |
 | `INPROCESS_CONCURRENCY` | `2` | Concurrent merge events without Redis |
