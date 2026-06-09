@@ -1,0 +1,32 @@
+# Dependencies & build output
+node_modules/
+dist/
+coverage/
+
+# Secrets & credentials — never commit these
+.env
+.env.*
+!.env.example
+*.pem
+
+# Local AI-assistant tooling state (machine-local, may contain session data)
+.claude/
+CLAUDE.md
+.claude-flow/
+.swarm/
+ruvector.db
+my-ruflo-project/
+.hive-mind/
+memory/
+
+# Temp & logs
+tmp/
+.tmp/
+*.log
+*.tsbuildinfo
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.idea/
+*.swp

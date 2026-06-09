@@ -1,0 +1,9 @@
+# Default owners for everything in the repo.
+# Replace @manikyashetty-arch with your GitHub username or team handle (e.g. @your-org/maintainers).
+* @manikyashetty-arch
+
+# Per-area owners — uncomment and customize as your team grows.
+# /src/services/   @manikyashetty-arch
+# /src/handlers/   @manikyashetty-arch
+# /.github/        @manikyashetty-arch
+# /tests/          @manikyashetty-arch

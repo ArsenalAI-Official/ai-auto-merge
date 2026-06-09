@@ -1,0 +1,31 @@
+# .auto-merge.yml — place this at the root of any repo where ai-auto-merge is installed.
+# All fields are optional and fall back to global server defaults.
+
+# Set to false to disable ai-auto-merge entirely for this repo.
+enabled: true
+
+# Minimum confidence for auto-applying a resolution without flagging for review.
+# Values: high | medium | low
+autoApplyConfidenceThreshold: high
+
+# Skip PRs with more conflicted files than this.
+maxFilesToAutoResolve: 20
+
+# Glob patterns for files that should never be auto-resolved.
+# Resolutions for these files will always be flagged for manual review.
+excludePaths:
+  - "package-lock.json"
+  - "yarn.lock"
+  - "pnpm-lock.yaml"
+  - "*.generated.ts"
+  - "migrations/**"
+
+# When true, post a PR comment showing proposed resolutions but do NOT push.
+# Useful for testing ai-auto-merge on a repo before fully enabling it.
+dryRun: false
+
+# When true AND every conflicted file was resolved at/above the confidence
+# threshold, enable GitHub's native auto-merge on the PR so it lands
+# automatically once CI passes and required reviews are in.
+# Requires "Allow auto-merge" in the repository settings.
+autoMergeOnCIPass: false

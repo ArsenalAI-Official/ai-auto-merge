@@ -1,0 +1,17 @@
+# Configure how users can sponsor this project.
+# Uncomment any line that applies and replace the placeholder value.
+# Docs: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/displaying-a-sponsor-button-in-your-repository
+
+# github: [your-github-username]
+# patreon: your-patreon-username
+# open_collective: your-collective-slug
+# ko_fi: your-ko-fi-username
+# tidelift: npm/ai-auto-merge
+# liberapay: your-liberapay-username
+# issuehunt: your-issuehunt-username
+# otechie: your-otechie-username
+# lfx_crowdfunding: your-lfx-username
+# polar: your-polar-username
+# buy_me_a_coffee: your-username
+# thanks_dev: your-username
+# custom: ['https://example.com/donate']
