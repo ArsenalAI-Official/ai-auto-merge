@@ -1,56 +1,93 @@
 # ai-auto-merge
 
-> Automatically resolve merge conflicts in open PRs using Claude AI, the moment another PR lands on `main` — then optionally auto-merge them when CI goes green.
+Automatically resolve merge conflicts in open pull requests using Claude, the moment another PR lands on the base branch — then optionally merge them when CI passes. Self-hosted, model-agnostic, and the only resolver that learns from your team's corrections.
 
 [![CI](https://github.com/manikyashetty-arch/ai-auto-merge/actions/workflows/ci.yml/badge.svg)](https://github.com/manikyashetty-arch/ai-auto-merge/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/manikyashetty-arch/ai-auto-merge/actions/workflows/codeql.yml/badge.svg)](https://github.com/manikyashetty-arch/ai-auto-merge/actions/workflows/codeql.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D20-brightgreen)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/typescript-5.x-blue)](https://www.typescriptlang.org)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 [![Use this template](https://img.shields.io/badge/use%20this-template-2ea44f?logo=github)](https://github.com/manikyashetty-arch/ai-auto-merge/generate)
 
-**How it works:** when PR #1 merges into `main`, ai-auto-merge finds every other open PR that now conflicts with `main`, resolves the conflicted files with Claude (two independent strategies + a judge model), syntax-checks the result, pushes the fix back to each PR branch, and posts a transparent comment with the diff, the reasoning, and the cost. If everything resolved at high confidence, it can arm GitHub auto-merge so the PR lands the moment CI passes — a fully closed loop.
+---
+
+## The problem
+
+On any active repository, merging one pull request silently breaks others. Every open PR that touched the same lines now conflicts with the base branch, and each author has to stop, rebase, re-resolve by hand, and re-request review. The more your team ships, the more time it loses to conflicts it didn't cause.
+
+Existing tooling treats the symptom, not the cause:
+
+- **Merge queues** (Mergify, Aviator, Graphite) serialize merges to *avoid* conflicts. When a conflict happens anyway, they eject the PR from the queue and leave it for a human.
+- **AI assistants** (GitHub Copilot, GitKraken, Cursor) can resolve a conflict well, but only when a person asks — a mention, a button, an IDE shortcut.
+
+Nobody closes the loop: detect the conflict automatically, resolve it, and learn whether the resolution was any good.
+
+## What ai-auto-merge does
+
+It runs as a GitHub App. When a PR merges, it finds every other open PR that now conflicts, resolves each conflicted file with Claude, validates the result, pushes the fix back to the PR branch, and posts a transparent comment explaining what changed and what it cost. No human in the loop unless confidence is low.
+
+Then it watches what happens next. If a human later edits or reverts a resolution, that is recorded as an override; if the PR merges with the resolution intact, that is an acceptance. Over time the bot learns which kinds of conflicts your team trusts it with and which it does not — and automatically stops auto-applying the categories you keep correcting.
 
 ---
 
-## ✨ Features
+## How it compares
 
-- **Zero-touch conflict resolution** — triggered by GitHub webhooks on PR merge.
-- **Slash commands** — comment `/ai-merge` on any PR to resolve on demand, `/ai-merge dry-run` to preview, `/ai-merge status` to inspect. Write-access gated.
-- **Dual-strategy + judge pipeline** — two independent Claude resolutions (conservative & synthesis); convergence = high confidence, divergence goes to a fast judge model.
-- **Self-healing syntax gate** — resolved files are syntax-checked before commit; failures are fed back to Claude for a one-shot repair before being flagged for review.
-- **Confidence-gated auto-apply** — Claude reports `high` / `medium` / `low` per file; you choose the threshold for auto-push.
-- **Auto-merge completion** — optionally enables GitHub native auto-merge after a clean resolution, so conflict → resolve → CI green → merged needs zero humans.
-- **Lockfile-aware** — `package-lock.json`, `yarn.lock`, `Cargo.lock`, `go.sum` & friends are never AI-merged; you get the exact regenerate command instead.
-- **Live dashboard** — `GET /dashboard` shows runs, outcomes, fast-path vs AI share, token usage and estimated spend. Zero build step, zero CDN.
-- **Prometheus metrics** — `GET /metrics` with runs, files, Claude calls, tokens, cost, and queue depth. Hand-rolled, zero extra dependencies.
-- **Cost transparency** — every PR comment ends with calls / tokens / % cached / estimated dollars. Prompt caching cuts the second strategy call to ~10% input cost.
-- **Per-repo overrides** — drop a `.auto-merge.yml` in any repo to tune behavior without redeploying.
-- **Built-in safety** — raw-body HMAC verification, `push --force-with-lease`, fork-PR detection, per-PR locking, file-size caps, rate limiting, max-files cap.
-- **Queue-aware** — optional Redis + BullMQ for high-volume orgs; bounded-concurrency in-process fallback with webhook dedup when `REDIS_URL` is unset.
+| | ai-auto-merge | GitHub Copilot conflict fix | Merge queues (Mergify / Aviator / Graphite) |
+|---|---|---|---|
+| Trigger | Automatic, on upstream merge | Human (mention or button) | Automatic, on enqueue |
+| On conflict | Resolves with AI | Resolves with AI | Ejects PR, asks a human |
+| Learns from human corrections | Yes | No | No |
+| Resolution cost shown per PR | Yes | No | N/A |
+| Deterministic fast paths (no AI cost) | Yes | No | N/A |
+| Self-hostable / open source | Yes (MIT) | No | No (SaaS) |
+| Model choice | Any Claude model | Fixed | N/A |
+
+ai-auto-merge is complementary to a merge queue, not a replacement for one: point the queue at the branches, and let ai-auto-merge keep them mergeable so the queue stops ejecting them. It is not trying to be an IDE assistant — it is the unattended, server-side half of the problem.
 
 ---
 
-## 🚀 Quickstart
+## Features
+
+**Resolution**
+- Dual-strategy resolution: a conservative pass (preserve both sides) and a synthesis pass (cleanest unified result) run independently. Agreement means high confidence with no further cost; disagreement is settled by a fast judge model.
+- Self-healing syntax gate: every resolved TypeScript, JavaScript, Python, and Go file is parsed before commit. A failure triggers one AI repair attempt with the exact error before the file is flagged for review.
+- Deterministic fast paths: additive conflicts and import-only conflicts are merged by rule, with zero AI calls. Lockfiles (`package-lock.json`, `go.sum`, `Cargo.lock`, and a dozen more) are never AI-merged; you get the exact regenerate command instead.
+- Confidence-gated auto-apply with a per-repo threshold; oversized files and high-fanout PRs are bounded to cap cost.
+
+**Adaptive learning** (unique to this project)
+- Tracks human accept/override signals per repository, file type, and resolution method.
+- Once a category accumulates enough signal and crosses an override threshold, it is automatically routed to manual review — no redeploy, no config change. The bot stops repeating the mistakes a given codebase punishes.
+- Fully visible on the dashboard and the `/api/insights` endpoint.
+
+**Workflow and access**
+- Slash commands on any PR: `/ai-merge` to resolve now, `/ai-merge dry-run` to preview, `/ai-merge status` to inspect. Write-access gated.
+- Optional auto-merge: arms GitHub native auto-merge after a fully clean resolution, so conflict to resolved to CI-green to merged needs zero humans.
+- Notifications: Slack, Discord, or any generic webhook on run completion.
+
+**Operations**
+- Live dashboard at `/dashboard`: runs, outcomes, fast-path vs AI share, what the bot has learned, token usage, and estimated spend.
+- Prometheus metrics at `/metrics`, JSON at `/api/stats`, `/api/runs`, `/api/insights`.
+- Cost transparency: every PR comment ends with calls, tokens, percent cached, and estimated dollars.
+- Queue-aware: optional Redis and BullMQ for high volume, with a bounded-concurrency in-process fallback and webhook deduplication when Redis is absent.
+
+---
+
+## Quickstart
 
 ```bash
-# 1. Use this repo as a template (click "Use this template" above) and clone your copy
+# Use this repository as a template (button above), then clone your copy
 git clone https://github.com/YOUR_USER/ai-auto-merge.git && cd ai-auto-merge
 
-# 2. Install + configure
 npm install
-cp .env.example .env   # fill in GitHub App + Anthropic credentials
-
-# 3. Run
-npm run dev            # or: npm run build && npm start
+cp .env.example .env        # fill in GitHub App and Anthropic credentials
+npm run dev                 # or: npm run build && npm start
 ```
 
-Then point your GitHub App's webhook at `POST /webhook` on the resulting server and open `http://localhost:3000/dashboard`.
+Point your GitHub App webhook at `POST /webhook` and open `http://localhost:3000/dashboard`.
 
-> **Prefer Docker?** `docker compose up --build` — that brings up the app and a Redis instance for queueing.
+Prefer containers: `docker compose up --build` brings up the app and a Redis instance.
 
-> **Make it yours:** if you fork or use this repo as a template, run a single search-and-replace of `manikyashetty-arch` → `your-org` (badges, links, `package.json`, `.github/`, and the bot's comment footer in `src/services/comments.ts`).
+If you fork or template this repository, do a single search-and-replace of `manikyashetty-arch` to your own org in the badges, links, `package.json`, `.github/`, and the bot comment footer in `src/services/comments.ts`.
 
 ---
 
@@ -58,27 +95,21 @@ Then point your GitHub App's webhook at `POST /webhook` on the resulting server 
 
 ### 1. Create a GitHub App
 
-1. Go to **GitHub → Settings → Developer Settings → GitHub Apps → New GitHub App**
-2. Set:
-   - **Webhook URL:** `https://your-server.com/webhook`
-   - **Webhook secret:** generate a random string and save it
-   - **Permissions:**
-     - Repository → Contents: Read & Write
-     - Repository → Pull requests: Read & Write
-     - Repository → Commit statuses: Read & Write
-     - Repository → Issues: Read & Write *(for `/ai-merge` slash commands and reactions)*
-   - **Subscribe to events:** Pull request, Issue comment
-3. Generate a **private key** and download the `.pem` file
-4. Note your **App ID** from the app's settings page
-5. Install the app on the repositories you want it to monitor
+Settings, Developer settings, GitHub Apps, New GitHub App.
+
+- Webhook URL: `https://your-server.com/webhook`
+- Webhook secret: a random string you also put in `.env`
+- Repository permissions:
+  - Contents: Read and write
+  - Pull requests: Read and write
+  - Commit statuses: Read and write
+  - Issues: Read and write (for slash commands and reactions)
+- Subscribe to events: Pull request, Issue comment
+- Generate a private key (`.pem`), note the App ID, install the App on your repositories.
+
+Do not grant Workflows permission. Without it, the App physically cannot modify `.github/workflows`, which is the safest default.
 
 ### 2. Configure environment
-
-```bash
-cp .env.example .env
-```
-
-Fill in `.env`:
 
 ```env
 GITHUB_APP_ID=123456
@@ -86,202 +117,162 @@ GITHUB_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE K
 GITHUB_WEBHOOK_SECRET=your-webhook-secret
 ANTHROPIC_API_KEY=sk-ant-...
 
-PORT=3000
 NODE_ENV=production
-
-# Auto-resolve files with confidence >= this level (high | medium | low)
 AUTO_APPLY_CONFIDENCE_THRESHOLD=high
+DASHBOARD_TOKEN=a-long-random-string
 
-# Skip PRs with more conflicted files than this
-MAX_FILES_TO_AUTO_RESOLVE=20
-
-# Protect /dashboard, /api/* and /metrics in production
-DASHBOARD_TOKEN=some-long-random-string
-
-# Optional: enable BullMQ-backed queueing
+# Optional integrations
+# SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...
 # REDIS_URL=redis://localhost:6379
 ```
 
-> **GITHUB_PRIVATE_KEY:** paste the full PEM contents with literal `\n` for newlines.
+`GITHUB_PRIVATE_KEY` takes the full PEM contents with literal `\n` for newlines.
 
 ### 3. Run
 
 ```bash
-npm run dev                       # development (auto-reload)
-npm run build && npm start        # production
+npm run dev                    # development, auto-reload
+npm run build && npm start     # production
 ```
-
-The server starts on `http://localhost:3000`.
 
 ---
 
-## 💬 Slash commands
+## Slash commands
 
-Anyone with **write access** can drive the bot from PR comments:
+Anyone with write access can drive the bot from a PR comment:
 
 | Command | Effect |
 |---|---|
-| `/ai-merge` or `/ai-merge resolve` | Resolve this PR's conflicts with AI right now |
-| `/ai-merge dry-run` | Post proposed resolutions as a comment without pushing |
-| `/ai-merge status` | Show mergeability, config, queue and last-run info |
-| `/ai-merge help` | List available commands |
+| `/ai-merge` or `/ai-merge resolve` | Resolve this PR's conflicts now |
+| `/ai-merge dry-run` | Post proposed resolutions without pushing |
+| `/ai-merge status` | Show mergeability, configuration, queue, and last-run info |
+| `/ai-merge help` | List commands |
 
-The bot reacts 👀 when it picks up a command. Permission is checked live against the repo (with the comment's `author_association` as fallback), so drive-by accounts can't trigger API spend.
+Permission is checked live against the repository, with the comment author association as a fallback, so accounts without write access cannot trigger spend.
 
 ---
 
-## 📊 Observability
+## Adaptive learning
 
-| Endpoint | What you get |
+The learning loop is what separates this from every other resolver. It needs no configuration to work, but you can tune or disable it.
+
+How it learns:
+
+1. When the bot resolves a PR, each applied file is provisional.
+2. If a human later pushes a commit that edits a file the bot resolved, that file's category is recorded as an override.
+3. If the PR merges with the resolution intact, the category is recorded as an acceptance.
+4. Once a `(repo, file-type, method)` category has at least `LEARNING_MIN_SAMPLES` observations and an override rate at or above `LEARNING_OVERRIDE_THRESHOLD`, new resolutions in that category are automatically routed to manual review.
+
+Everything it has learned is visible on the dashboard and at `GET /api/insights`. Set `LEARNING_ENABLED=false` for fully static behavior.
+
+---
+
+## Observability
+
+| Endpoint | Contents |
 |---|---|
-| `GET /dashboard` | Live HTML dashboard — runs, outcomes, files, fast-path share, tokens, est. spend. Auto-refreshes. |
-| `GET /api/stats` | The same aggregates as JSON |
+| `GET /dashboard` | Live HTML: runs, outcomes, learning insights, tokens, estimated spend |
+| `GET /api/stats` | Aggregate stats as JSON |
 | `GET /api/runs?limit=50` | Recent run records with per-file detail |
-| `GET /metrics` | Prometheus text format: `aam_runs_total`, `aam_files_total`, `aam_claude_calls_total`, `aam_tokens_total`, `aam_cost_usd_total`, `aam_run_duration_seconds`, queue gauges |
-| `GET /health` | Liveness + version + queue mode + model |
+| `GET /api/insights` | Learned accept/override rates and which categories are gated |
+| `GET /metrics` | Prometheus text format |
+| `GET /health` | Liveness, version, queue mode, model, learning and notification status |
 
-Set `DASHBOARD_TOKEN` in production — then open `/dashboard?token=...` or send `Authorization: Bearer ...`. Without it these endpoints are public (fine for localhost, not for the internet — repo names and PR titles are visible).
-
----
-
-## Local development with tunneling
-
-```bash
-ngrok http 3000
-# or
-gh webhook forward --events=pull_request,issue_comment --url=http://localhost:3000/webhook
-```
-
-Update your GitHub App's webhook URL with the tunnel URL.
+Set `DASHBOARD_TOKEN` in production; these endpoints then require `Authorization: Bearer <token>` or `?token=`. Without it they are public, which exposes repository names, PR titles, and spend.
 
 ---
 
 ## Configuration
 
-| Env var | Default | Description |
+| Variable | Default | Description |
 |---|---|---|
-| `GITHUB_APP_ID` | _required_ | Numeric App ID from your GitHub App settings |
-| `GITHUB_PRIVATE_KEY` | _required_ | PEM contents of the App's private key (use `\n` for newlines) |
-| `GITHUB_WEBHOOK_SECRET` | _required_ | Shared secret used to verify webhook signatures |
-| `ANTHROPIC_API_KEY` | _required_ | Anthropic API key for Claude calls |
-| `ANTHROPIC_MODEL` | `claude-opus-4-8` | Model for resolution proposals & syntax repair |
-| `ANTHROPIC_JUDGE_MODEL` | `claude-haiku-4-5` | Cheap model that arbitrates diverging proposals |
-| `PORT` | `3000` | HTTP server port |
+| `GITHUB_APP_ID` | required | Numeric App ID |
+| `GITHUB_PRIVATE_KEY` | required | App private key PEM (use `\n` for newlines) |
+| `GITHUB_WEBHOOK_SECRET` | required | Webhook signature secret |
+| `ANTHROPIC_API_KEY` | required | Anthropic API key |
+| `ANTHROPIC_MODEL` | `claude-opus-4-8` | Model for resolution and repair |
+| `ANTHROPIC_JUDGE_MODEL` | `claude-haiku-4-5` | Model that arbitrates diverging proposals |
+| `PORT` | `3000` | HTTP port |
 | `NODE_ENV` | `development` | `development` or `production` |
-| `AUTO_APPLY_CONFIDENCE_THRESHOLD` | `high` | Minimum Claude confidence to auto-push (`high`, `medium`, `low`) |
+| `AUTO_APPLY_CONFIDENCE_THRESHOLD` | `high` | Minimum confidence to auto-push (`high`, `medium`, `low`) |
 | `MAX_FILES_TO_AUTO_RESOLVE` | `20` | Skip PRs with more conflicted files than this |
-| `MAX_FILE_BYTES` | `262144` | Conflicted files larger than this are flagged for manual review instead of sent to the AI |
-| `AUTO_MERGE_ON_CI_PASS` | `false` | Arm GitHub auto-merge after a fully-clean resolution (repo must allow auto-merge) |
-| `AUTO_MERGE_METHOD` | `SQUASH` | `MERGE`, `SQUASH` or `REBASE` for armed auto-merges |
-| `DASHBOARD_TOKEN` | _unset_ | Bearer token guarding `/dashboard`, `/api/*`, `/metrics` |
+| `MAX_FILE_BYTES` | `262144` | Files larger than this are flagged, not sent to the AI |
+| `AUTO_MERGE_ON_CI_PASS` | `false` | Arm GitHub auto-merge after a fully clean resolution |
+| `AUTO_MERGE_METHOD` | `SQUASH` | `MERGE`, `SQUASH`, or `REBASE` |
+| `LEARNING_ENABLED` | `true` | Enable the adaptive learning loop |
+| `LEARNING_MIN_SAMPLES` | `5` | Observations before a category can gate |
+| `LEARNING_OVERRIDE_THRESHOLD` | `0.5` | Override rate at which a category is gated |
+| `SLACK_WEBHOOK_URL` | unset | Slack/Discord incoming webhook for run notifications |
+| `NOTIFY_WEBHOOK_URL` | unset | Generic webhook receiving the full run summary |
+| `NOTIFY_ONLY_OUTCOMES` | unset | Comma-separated outcomes to notify on; empty means all meaningful ones |
+| `DASHBOARD_TOKEN` | unset | Bearer token guarding `/dashboard`, `/api/*`, `/metrics` |
 | `RATE_LIMIT_PER_MIN` | `300` | Per-IP request ceiling; `0` disables |
-| `TRUST_PROXY` | `false` | Set `true` only behind a reverse proxy so client IPs come from `X-Forwarded-For` |
-| `REDIS_URL` | _unset_ | When set, enables BullMQ queueing; otherwise bounded in-process fallback |
+| `TRUST_PROXY` | `false` | Set true only behind a reverse proxy |
+| `REDIS_URL` | unset | Enables BullMQ queueing when set |
 | `QUEUE_CONCURRENCY` | `3` | BullMQ worker concurrency |
 | `INPROCESS_CONCURRENCY` | `2` | Concurrent merge events without Redis |
 
-Per-repo overrides via `.auto-merge.yml` — see [`.auto-merge.example.yml`](.auto-merge.example.yml). Repo config supports `enabled`, `autoApplyConfidenceThreshold`, `maxFilesToAutoResolve`, `excludePaths`, `dryRun` and `autoMergeOnCIPass`.
+Per-repository overrides live in `.auto-merge.yml`; see [`.auto-merge.example.yml`](.auto-merge.example.yml). Supported keys: `enabled`, `autoApplyConfidenceThreshold`, `maxFilesToAutoResolve`, `excludePaths`, `dryRun`, `autoMergeOnCIPass`.
 
 ---
 
-## What Claude does
+## How resolution works
 
-For each conflicted file (after fast-path heuristics and lockfile/oversize filters):
+For each conflicted file, after fast-path and lockfile filtering:
 
-1. **Two independent resolutions** are generated with adaptive thinking — a *conservative* strategy (preserve everything from both sides) and a *synthesis* strategy (cleanest unified implementation). Both share a cached prompt prefix (PR title/description, full PR diff, the conflicted file), so the second call reads the cache at ~10% input price.
-2. **Convergence check** — if both strategies produce identical content, that is strong evidence of correctness: auto-apply with high confidence, no judge needed.
-3. **Judge** — if they diverge, a fast model (Haiku) picks the better proposal or rejects both.
-4. **Syntax gate** — TypeScript/JavaScript/Python/Go files are parsed before commit. A failure triggers one AI repair attempt with the exact error message; if it still fails, the file is downgraded to needs-review.
+1. Two independent resolutions are generated with adaptive thinking — conservative and synthesis. The shared prompt prefix (PR title, description, full diff, and the conflicted file) is cached, so the second call reads it at roughly a tenth of the input price.
+2. If both strategies produce identical content, the resolution is auto-applied at high confidence with no judge call.
+3. If they diverge, a fast model picks the better proposal or rejects both.
+4. The chosen resolution is syntax-checked, repaired once if needed, then gated against the learning loop before being applied.
 
-Per file Claude returns **resolved_content**, **confidence** (`high`/`medium`/`low`), an **explanation**, and **needs_review**. Files below your threshold are left for manual resolution and listed clearly in the PR comment, along with token usage and estimated cost.
-
-Files that never reach the AI:
-
-- **Additive conflicts** (both sides added different declarations) — merged deterministically.
-- **Import-only conflicts** — merged and deduplicated at the symbol level.
-- **Lockfiles** — flagged with the exact regenerate command (`npm install --package-lock-only`, `go mod tidy`, …).
-- **Oversized files** (> `MAX_FILE_BYTES`) — flagged for manual review to bound cost.
+Untrusted PR content (titles, descriptions, diffs, file contents) is treated strictly as data, not instructions, and is size-capped. The decisive backstop against a wrong resolution is that every result is an ordinary commit on a PR branch that a human reviews before merge.
 
 ---
 
 ## Architecture
 
 ```
-GitHub webhook (PR merged / issue_comment)
-        ↓  raw-body HMAC verification
-  src/handlers/webhook.ts ──── /ai-merge commands (permission-gated)
-        ↓
-  src/services/queue.ts  (BullMQ if REDIS_URL set, else bounded in-process + dedup)
-        ↓  per-PR lock
-  src/services/prProcessor.ts
-    ├── GitHub API: find conflicted PRs (parallel mergeability polling, fork-PR filter)
-    ├── git: clone PR branch, merge base (detect conflicts)
-    ├── src/services/conflictClassifier.ts  ← fast paths + lockfile detection
-    ├── src/services/conflictResolver.ts    ← Claude: 2 strategies + judge, prompt-cached
-    ├── src/services/syntaxCheck.ts         ← parse gate
-    │     └── AI syntax repair (one retry with the error)
-    ├── git: write resolved files, commit, push --force-with-lease
-    ├── GitHub API: post comment (+cost), commit status, optional auto-merge arm
-    └── src/services/runHistory.ts + utils/metrics.ts  → /dashboard, /api/*, /metrics
+GitHub webhook (PR merged / PR synchronize / issue comment)
+        |  raw-byte HMAC verification
+  handlers/webhook.ts ------ /ai-merge commands (permission gated)
+        |                     learning signals (override / acceptance)
+  services/queue.ts  (BullMQ if REDIS_URL set, else bounded in-process + dedup)
+        |  per-PR lock
+  services/prProcessor.ts
+    |-- github: find conflicted PRs (parallel mergeability, fork filter)
+    |-- git: clone PR branch, merge base, detect conflicts
+    |-- services/conflictClassifier.ts   fast paths + lockfile detection
+    |-- services/conflictResolver.ts     two strategies + judge, prompt-cached
+    |-- services/syntaxCheck.ts          parse gate, AI repair on failure
+    |-- services/learning.ts             adaptive gate on history
+    |-- git: write resolved files, commit, push --force-with-lease
+    |-- github: comment with cost, commit status, optional auto-merge
+    |-- services/notify.ts               Slack / webhook
+    \-- services/runHistory.ts + utils/metrics.ts  -> dashboard, /api/*, /metrics
 ```
 
 ---
 
-## FAQ
-
-**Q: What happens if Claude resolves a file incorrectly?**
-A: Five layers of defense: dual-strategy convergence (disagreement → judge or human), confidence threshold (don't push low-confidence resolutions), syntax check with AI repair before commit, `--force-with-lease` so concurrent pushes can't be clobbered, and a fully transparent PR comment — a human can revert with one click.
-
-**Q: Does it work on monorepos?**
-A: Yes. `MAX_FILES_TO_AUTO_RESOLVE` caps the per-PR fanout, `MAX_FILE_BYTES` caps per-file cost, and `excludePaths` globs keep generated code out of the AI's hands.
-
-**Q: How much does it cost to run?**
-A: Each complex conflict costs two cached-prefix Claude calls (+ occasionally a Haiku judge call). Additive/import/lockfile conflicts cost zero AI calls. Every PR comment and the dashboard show the exact token count and estimated dollars, so you never have to guess. Mid-size orgs land at single-digit dollars per week.
-
-**Q: Can the bot merge the PR for me too?**
-A: Yes — set `AUTO_MERGE_ON_CI_PASS=true` (or `autoMergeOnCIPass: true` per repo) and enable "Allow auto-merge" in the repo settings. The bot arms GitHub's native auto-merge only when *every* conflicted file resolved at/above your threshold, so partially-resolved PRs always wait for a human.
-
-**Q: What about PRs from forks?**
-A: Detected and skipped — a GitHub App can't push to fork branches. The PR is left untouched.
-
-**Q: Can I use a model other than Claude?**
-A: Set `ANTHROPIC_MODEL` to any Claude model. For other vendors, the resolver lives in a single file (`src/services/conflictResolver.ts`) — swap the SDK call and open a PR.
-
-**Q: Why TypeScript and not Python / Go?**
-A: GitHub's `@octokit/webhooks` + `@anthropic-ai/sdk` are first-class in TypeScript, and Express is the smallest possible webhook surface.
-
----
-
-## Troubleshooting
-
-| Symptom | Likely cause |
-|---|---|
-| `Missing required env var: ...` on boot | `.env` not loaded or var missing. Confirm `dotenv` picks up `./.env`. |
-| Webhook returns 401 | `GITHUB_WEBHOOK_SECRET` doesn't match the App's secret. |
-| Webhook returns 429 | Rate limiter tripped — raise `RATE_LIMIT_PER_MIN`. |
-| `Bad credentials` from GitHub | `GITHUB_PRIVATE_KEY` newlines wrong — must contain literal `\n` escape, not real newlines. |
-| Nothing happens after PR merges | The App isn't installed on that repo, or you didn't subscribe to `pull_request` events. |
-| `/ai-merge` comments are ignored | Subscribe the App to **Issue comment** events and grant Issues Read & Write. |
-| Auto-merge never arms | Enable "Allow auto-merge" in the repository settings. |
-| Claude returns low confidence on simple conflicts | PR description is empty — Claude uses it for intent. Add a description and comment `/ai-merge resolve`. |
-| `/dashboard` returns 401 | `DASHBOARD_TOKEN` is set — append `?token=...` or send a Bearer header. |
-
----
-
-## Contributing
-
-PRs welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the dev loop, commit conventions, and how to add tests.
-
 ## Security
 
-Report vulnerabilities privately — see [SECURITY.md](SECURITY.md).
+ai-auto-merge holds write access to PR branches and processes input from anyone who can open a PR, so it is built defensively: raw-byte webhook verification, strict owner/repo/ref validation, workspace-contained file operations with symlinks disabled at clone, constant-time token comparison, security headers, a spoof-resistant rate limiter, prompt-injection mitigations, and supply-chain-hardened container builds. The full threat model and deployment hardening checklist are in [SECURITY.md](SECURITY.md). Report vulnerabilities privately via GitHub Security Advisories.
+
+---
+
+## Development
+
+```bash
+npm run lint
+npm run build
+npm test
+```
+
+Tests mock all external services and never hit a real API. See [CONTRIBUTING.md](CONTRIBUTING.md) for the project map, commit conventions, and PR process.
 
 ## License
 
 [MIT](LICENSE)
 
----
+## Sources
 
-## ⭐ Star history
-
-[![Star History Chart](https://api.star-history.com/svg?repos=manikyashetty-arch/ai-auto-merge&type=Date)](https://star-history.com/#manikyashetty-arch/ai-auto-merge&Date)
+Competitive landscape researched June 2026: [GitHub Copilot conflict resolution](https://github.blog/changelog/2026-04-13-fix-merge-conflicts-in-three-clicks-with-copilot-cloud-agent/), [Graphite merge queue](https://graphite.com/guides/merge-queue-tools-options), [Aviator MergeQueue](https://www.aviator.co/merge-queue), [Mergify](https://mergify.com/).

@@ -14,6 +14,13 @@ function intEnv(key: string, fallback: number): number {
   return Number.isFinite(n) ? n : fallback;
 }
 
+function floatEnv(key: string, fallback: number): number {
+  const raw = process.env[key];
+  if (!raw) return fallback;
+  const n = parseFloat(raw);
+  return Number.isFinite(n) ? n : fallback;
+}
+
 export const config = {
   github: {
     appId: parseInt(requireEnv('GITHUB_APP_ID'), 10),
@@ -52,5 +59,28 @@ export const config = {
     queueConcurrency: intEnv('QUEUE_CONCURRENCY', 3),
     /** Concurrent PR-merge events processed in-process when Redis is absent. */
     inProcessConcurrency: intEnv('INPROCESS_CONCURRENCY', 2),
+  },
+  /**
+   * Adaptive learning: the bot watches whether humans accept or override its
+   * resolutions and stops auto-applying conflict categories a team keeps
+   * rejecting. Disable to make behavior fully static.
+   */
+  learning: {
+    enabled: process.env.LEARNING_ENABLED !== 'false',
+    /** Min samples in a (repo, ext, method) bucket before its rate can gate. */
+    minSamples: intEnv('LEARNING_MIN_SAMPLES', 5),
+    /** Override rate (0-1) at/above which a bucket is forced to manual review. */
+    overrideThreshold: floatEnv('LEARNING_OVERRIDE_THRESHOLD', 0.5),
+  },
+  notifications: {
+    /** Slack-compatible incoming webhook URL (also works for Discord with /slack suffix). */
+    slackWebhookUrl: process.env.SLACK_WEBHOOK_URL || '',
+    /** Generic webhook — receives the full run summary as JSON. */
+    genericWebhookUrl: process.env.NOTIFY_WEBHOOK_URL || '',
+    /** Only notify on these outcomes (comma-separated); empty = all terminal outcomes. */
+    onlyOutcomes: (process.env.NOTIFY_ONLY_OUTCOMES || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
   },
 };

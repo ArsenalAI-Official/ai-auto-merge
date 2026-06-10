@@ -10,6 +10,7 @@ import {
 import { enqueueConflictResolution, enqueueManualResolve, getQueueStats, isQueueEnabled } from '../services/queue';
 import { getRepoConfig } from '../services/repoConfig';
 import { getLastRunForPR } from '../services/runHistory';
+import { handleHumanPush, handleMergedForLearning } from '../services/learningSignals';
 import {
   buildHelpComment,
   buildStatusComment,
@@ -78,7 +79,37 @@ export function registerWebhookHandlers(): void {
     };
 
     logger.info(`Webhook ${id}: PR #${event.prNumber} merged into ${event.baseRef}`);
+
+    // Learning: if WE resolved this PR and it survived to merge, that's an
+    // acceptance signal. Best-effort, never blocks the resolution fan-out.
+    try {
+      handleMergedForLearning(event.repoOwner, event.repoName, event.prNumber);
+    } catch (err) {
+      logger.debug('Learning acceptance signal failed:', err);
+    }
+
     await enqueueConflictResolution(event);
+  });
+
+  // A human pushed to a PR branch — detect overrides of our resolutions.
+  app.webhooks.on('pull_request.synchronize', async ({ payload }) => {
+    const installationId = payload.installation?.id;
+    if (!installationId) return;
+    // Ignore our own resolution pushes (the bot is a Bot-type sender).
+    if (payload.sender?.type === 'Bot') return;
+
+    metrics.webhookEvents.inc({ event: 'pull_request.synchronize' });
+    try {
+      await handleHumanPush({
+        repoOwner: payload.repository.owner.login,
+        repoName: payload.repository.name,
+        prNumber: payload.pull_request.number,
+        installationId,
+        newHeadSha: payload.pull_request.head.sha,
+      });
+    } catch (err) {
+      logger.debug('Learning override signal failed:', err);
+    }
   });
 
   app.webhooks.on('issue_comment.created', async ({ payload }) => {

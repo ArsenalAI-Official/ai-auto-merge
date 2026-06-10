@@ -132,4 +132,8 @@ export interface RunRecord {
   commitSha?: string;
   files: RunFileRecord[];
   usage: RunUsage;
+  /** Set once a human override has been recorded against this run's resolution, so acceptance isn't also counted. */
+  superseded?: boolean;
+  /** Set once acceptance has been counted at merge, so it isn't double-counted. */
+  learningSettled?: boolean;
 }

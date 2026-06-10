@@ -13,6 +13,7 @@ import { resolveConflicts, repairResolution } from './conflictResolver';
 import { getRepoConfig } from './repoConfig';
 import { checkSyntax } from './syntaxCheck';
 import { startRun, finishRun } from './runHistory';
+import { getGate } from './learning';
 import {
   buildSuccessComment,
   buildDryRunComment,
@@ -248,6 +249,10 @@ async function resolveWithRun(
     // Pre-push syntax gate with one AI repair attempt per failing file
     await syntaxGate(resolvedFiles, ctx.dir, run);
 
+    // Adaptive learning gate: route conflict categories this team has
+    // historically overridden back to manual review.
+    applyLearningGates(`${pr.repoOwner}/${pr.repoName}`, resolvedFiles);
+
     const { autoApply, needsReview } = classifyResolutions(resolvedFiles, repoConfig);
 
     recordRunFiles(run, resolvedFiles, autoApply, dryRun);
@@ -333,6 +338,24 @@ async function syntaxGate(resolvedFiles: ResolvedFile[], repoDir: string, run: R
     file.needsReview = true;
     file.confidence = 'low';
     file.explanation += ` [syntax check failed: ${check.error?.slice(0, 120)}]`;
+  }
+}
+
+/**
+ * Downgrade resolutions to needs-review when the learning loop has seen this
+ * team override the same (file-type, method) category often enough. This is
+ * what makes the bot stop repeating mistakes a given codebase punishes.
+ */
+function applyLearningGates(repo: string, resolvedFiles: ResolvedFile[]): void {
+  for (const file of resolvedFiles) {
+    if (file.needsReview) continue;
+    const gate = getGate(repo, file.path, file.method ?? 'ai_judged');
+    if (gate.forceReview) {
+      file.needsReview = true;
+      file.confidence = 'low';
+      file.explanation += ` [${gate.reason}]`;
+      logger.info(`${file.path}: learning gate forced manual review (override rate ${Math.round((gate.overrideRate ?? 0) * 100)}%)`);
+    }
   }
 }
 

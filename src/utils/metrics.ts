@@ -102,6 +102,9 @@ export const metrics = {
   costUsd: new Counter('aam_cost_usd_total', 'Estimated Anthropic spend in USD'),
   httpRequests: new Counter('aam_http_requests_total', 'HTTP requests served, by route and status'),
   rateLimited: new Counter('aam_rate_limited_total', 'Requests rejected by the rate limiter'),
+  learningSignals: new Counter('aam_learning_signals_total', 'Human accept/override signals on AI resolutions, by method'),
+  learningGates: new Counter('aam_learning_gates_total', 'Resolutions forced to manual review by the learning loop'),
+  notifications: new Counter('aam_notifications_total', 'Outbound notifications, by channel and outcome'),
   runDuration: new Summary('aam_run_duration_seconds', 'Duration of conflict-resolution runs'),
   inflightRuns: new Gauge('aam_inflight_runs', 'Conflict-resolution runs currently executing'),
 };

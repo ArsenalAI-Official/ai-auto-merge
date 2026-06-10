@@ -83,6 +83,8 @@ export const dashboardHtml = `<!doctype html>
 </header>
 <main>
   <div class="cards" id="cards"></div>
+  <h2>What ai-auto-merge has learned <span class="muted">— accept/override patterns per repo &amp; file type</span></h2>
+  <div id="insights"></div>
   <h2>Recent runs <span class="muted" id="window"></span></h2>
   <div id="runs"></div>
 </main>
@@ -122,10 +124,40 @@ export const dashboardHtml = `<!doctype html>
       card('Fast-path share', fastShare + '%', 'resolved without AI calls'),
       card('Tokens', fmtTok(s.usage.totalTokens), cachePct + '% from cache'),
       card('Est. spend', fmtUsd(s.usage.costUsd), 'avg run ' + dur(s.usage.avgDurationMs)),
+      card('Learning', s.learning && s.learning.enabled ? s.learning.trackedBuckets + ' tracked' : 'off', s.learning && s.learning.enabled ? s.learning.gatingBuckets + ' categories auto-gated' : 'set LEARNING_ENABLED'),
       card('Queue', esc(s.queue.mode), s.queue.stats ? s.queue.stats.waiting + ' waiting · ' + s.queue.stats.active + ' active · ' + s.queue.stats.failed + ' failed' : 'in-process fallback'),
-      card('Uptime', s.uptimeHuman, 'v' + esc(s.version)),
+      card('Uptime', s.uptimeHuman, 'v' + esc(s.version) + (s.notifications ? ' · notify on' : '')),
     ].join('');
     $('window').textContent = '(last ' + s.runs.total + ')';
+  }
+
+  function renderInsights(data) {
+    if (!data.enabled) {
+      $('insights').innerHTML = '<div class="empty">Adaptive learning is disabled (LEARNING_ENABLED=false).</div>';
+      return;
+    }
+    const rows = data.buckets.filter((b) => b.accepted + b.overridden > 0);
+    if (!rows.length) {
+      $('insights').innerHTML = '<div class="empty">No learning signal yet. As humans accept or override AI resolutions, per-repo / per-filetype patterns appear here — and categories crossing the override threshold get auto-routed to manual review.</div>';
+      return;
+    }
+    const body = rows.slice(0, 20).map((b) => {
+      const total = b.accepted + b.overridden;
+      const pct = Math.round(b.overrideRate * 100);
+      const barColor = b.gating ? 'var(--bad)' : pct > 25 ? 'var(--warn)' : 'var(--accent2)';
+      return '<tr>' +
+        '<td class="mono">' + esc(b.repo) + '</td>' +
+        '<td class="mono">.' + esc(b.ext) + '</td>' +
+        '<td class="mono muted">' + esc(b.method) + '</td>' +
+        '<td class="mono">' + b.accepted + ' / ' + b.overridden + '</td>' +
+        '<td style="min-width:120px"><div class="bar"><i style="width:' + pct + '%;background:' + barColor + '"></i></div><span class="mono muted">' + pct + '% overridden (' + total + ')</span></td>' +
+        '<td>' + (b.gating ? '<span class="pill error">auto-gated</span>' : '<span class="pill resolved">trusted</span>') + '</td>' +
+      '</tr>';
+    }).join('');
+    $('insights').innerHTML = '<table><thead><tr>' +
+      '<th>Repo</th><th>Type</th><th>Method</th><th>Accept / Override</th><th>Override rate</th><th>Status</th>' +
+      '</tr></thead><tbody>' + body + '</tbody></table>' +
+      '<div class="muted mono" style="margin-top:8px">Gating at ≥' + Math.round(data.threshold * 100) + '% override once a category has ≥' + data.minSamples + ' samples.</div>';
   }
 
   function fileRow(f) {
@@ -173,11 +205,13 @@ export const dashboardHtml = `<!doctype html>
 
   async function refresh() {
     try {
-      const [stats, runs] = await Promise.all([
+      const [stats, runs, insights] = await Promise.all([
         fetch('/api/stats' + qs).then((r) => { if (!r.ok) throw new Error(r.status); return r.json(); }),
         fetch('/api/runs' + qs + (qs ? '&' : '?') + 'limit=50').then((r) => { if (!r.ok) throw new Error(r.status); return r.json(); }),
+        fetch('/api/insights' + qs).then((r) => { if (!r.ok) throw new Error(r.status); return r.json(); }),
       ]);
       renderStats(stats);
+      renderInsights(insights);
       renderRuns(runs.runs);
       $('conn').innerHTML = '<span class="dot"></span>live';
       $('updated').textContent = new Date().toLocaleTimeString();

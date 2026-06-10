@@ -29,7 +29,10 @@ While developing, `http://localhost:3000/dashboard` shows live runs, token usage
 | `src/services/conflictResolver.ts` | Claude pipeline: dual strategies, judge, repair |
 | `src/services/prompts.ts` | All Claude prompts |
 | `src/services/conflictClassifier.ts` | Fast paths: additive, imports, lockfiles |
-| `src/services/gitOps.ts` | Clone / merge / push plumbing |
+| `src/services/gitOps.ts` | Clone / merge / push plumbing + input validation |
+| `src/services/learning.ts` | Adaptive learning store + gating (pure decision logic) |
+| `src/services/learningSignals.ts` | Bridges webhook events to the learning loop |
+| `src/services/notify.ts` | Slack / generic webhook notifications |
 | `src/services/queue.ts` | BullMQ + bounded in-process fallback |
 | `src/services/runHistory.ts`, `src/utils/metrics.ts` | Observability backing `/dashboard`, `/api/*`, `/metrics` |
 | `tests/` | Jest suites — mock all external services |

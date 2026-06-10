@@ -252,6 +252,31 @@ export async function enableAutoMerge(
   }
 }
 
+/**
+ * Files changed between two commits (base..head). Used by the learning loop to
+ * tell whether a human's later push touched files the bot had resolved.
+ * Best-effort: returns an empty set on any API failure.
+ */
+export async function compareCommitFiles(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  base: string,
+  head: string
+): Promise<Set<string>> {
+  try {
+    const { data } = await octokit.repos.compareCommitsWithBasehead({
+      owner,
+      repo,
+      basehead: `${base}...${head}`,
+    });
+    return new Set((data.files ?? []).map((f) => f.filename));
+  } catch (err) {
+    logger.debug(`Could not compare ${base}...${head} on ${owner}/${repo}:`, err);
+    return new Set();
+  }
+}
+
 /** Fetch the unified diff of a PR to give Claude richer context. */
 export async function getPRDiff(
   octokit: Octokit,

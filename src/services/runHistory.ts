@@ -1,6 +1,7 @@
 import { RunOutcome, RunRecord, TriggerInfo } from '../types';
 import { newRunUsage, totalTokens } from '../utils/pricing';
 import { metrics } from '../utils/metrics';
+import { notifyRunComplete } from './notify';
 
 /**
  * In-memory ring buffer of recent resolution runs. Powers /dashboard and
@@ -57,6 +58,10 @@ export function finishRun(record: RunRecord, outcome: RunOutcome, detail?: strin
   for (const f of record.files) {
     metrics.filesTotal.inc({ method: f.method, applied: String(f.applied) });
   }
+
+  // Single completion point for every code path — emit notifications here so
+  // no caller can forget. Fire-and-forget; notify never throws.
+  void notifyRunComplete(record);
 }
 
 export function getRuns(limit = 50): RunRecord[] {

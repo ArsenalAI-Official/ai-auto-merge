@@ -63,6 +63,8 @@ Untrusted inputs and their defenses:
 - Keep `MAX_FILE_BYTES` / `MAX_FILES_TO_AUTO_RESOLVE` bounded — they are your cost-DoS guards.
 - If you enable Redis, require auth on it (`REDIS_URL` with password) and keep it off the public network.
 - The Docker image runs as a non-root user with lifecycle scripts disabled at install time.
+- Outbound notifications (`SLACK_WEBHOOK_URL`, `NOTIFY_WEBHOOK_URL`) are operator-configured trusted destinations; payloads contain repository names, PR titles, file paths, and spend — point them only at channels cleared to see that.
+- The learning store keeps file paths and accept/override counts in process memory only; it holds no file contents and is not persisted.
 
 ## Secrets
 

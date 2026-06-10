@@ -25,4 +25,14 @@ export const config = {
     queueConcurrency: 3,
     inProcessConcurrency: 2,
   },
+  learning: {
+    enabled: true,
+    minSamples: 5,
+    overrideThreshold: 0.5,
+  },
+  notifications: {
+    slackWebhookUrl: '',
+    genericWebhookUrl: '',
+    onlyOutcomes: [] as string[],
+  },
 };

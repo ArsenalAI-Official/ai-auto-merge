@@ -3,6 +3,8 @@ import express from 'express';
 import { registerWebhookHandlers, handleWebhook } from './handlers/webhook';
 import { getQueueStats, isQueueEnabled } from './services/queue';
 import { getRuns, getStats } from './services/runHistory';
+import { getInsights } from './services/learning';
+import { notificationsConfigured } from './services/notify';
 import { dashboardHtml } from './dashboard/html';
 import { logger } from './utils/logger';
 import { config } from './utils/config';
@@ -12,7 +14,7 @@ const VERSION = process.env.npm_package_version || '1.0.0';
 const startedAt = Date.now();
 
 // Fixed route labels keep Prometheus cardinality bounded.
-const KNOWN_ROUTES = new Set(['/webhook', '/health', '/metrics', '/dashboard', '/api/stats', '/api/runs']);
+const KNOWN_ROUTES = new Set(['/webhook', '/health', '/metrics', '/dashboard', '/api/stats', '/api/runs', '/api/insights']);
 
 function humanUptime(ms: number): string {
   const s = Math.floor(ms / 1000);
@@ -143,6 +145,8 @@ export function createApp(): express.Application {
       uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000),
       queue: isQueueEnabled() ? 'enabled' : 'disabled (in-process fallback)',
       model: config.anthropic.model,
+      learning: config.learning.enabled ? 'on' : 'off',
+      notifications: notificationsConfigured() ? 'configured' : 'none',
     });
   });
 
@@ -155,9 +159,17 @@ export function createApp(): express.Application {
   app.get('/api/stats', guard, async (_req, res) => {
     const stats = getStats();
     const queueStats = await getQueueStats().catch(() => null);
+    const insights = getInsights(1000);
+    const gatingBuckets = insights.buckets.filter((b) => b.gating).length;
     res.json({
       ...stats,
       queue: { mode: isQueueEnabled() ? 'bullmq' : 'in-process', stats: queueStats },
+      learning: {
+        enabled: insights.enabled,
+        trackedBuckets: insights.buckets.length,
+        gatingBuckets,
+      },
+      notifications: notificationsConfigured(),
       version: VERSION,
       uptimeHuman: humanUptime(Date.now() - startedAt),
     });
@@ -166,6 +178,11 @@ export function createApp(): express.Application {
   app.get('/api/runs', guard, (req, res) => {
     const limit = parseInt((req.query.limit as string) || '50', 10);
     res.json({ runs: getRuns(Number.isFinite(limit) ? limit : 50) });
+  });
+
+  app.get('/api/insights', guard, (req, res) => {
+    const limit = parseInt((req.query.limit as string) || '100', 10);
+    res.json(getInsights(Number.isFinite(limit) ? limit : 100));
   });
 
   app.get('/metrics', guard, async (_req, res) => {
