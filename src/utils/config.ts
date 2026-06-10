@@ -31,8 +31,16 @@ export const config = {
     apiKey: requireEnv('ANTHROPIC_API_KEY'),
     /** Model used for conflict resolution proposals. Must support adaptive thinking for best results. */
     model: process.env.ANTHROPIC_MODEL || 'claude-opus-4-8',
-    /** Cheaper model used to judge between diverging proposals. */
+    /** Cheaper model used to judge/verify resolutions. */
     judgeModel: process.env.ANTHROPIC_JUDGE_MODEL || 'claude-haiku-4-5',
+    /** Effort for resolution/repair calls — lower spends fewer thinking tokens. */
+    effort: (process.env.ANTHROPIC_EFFORT || 'medium') as 'low' | 'medium' | 'high' | 'max',
+    /**
+     * adaptive: one proposal + a cheap verifier, escalating to dual-strategy +
+     * judge only on doubt (default, most token-efficient).
+     * thorough: always run both strategies + judge (highest assurance, ~2x cost).
+     */
+    resolutionMode: (process.env.RESOLUTION_MODE || 'adaptive') as 'adaptive' | 'thorough',
   },
   server: {
     port: intEnv('PORT', 3000),

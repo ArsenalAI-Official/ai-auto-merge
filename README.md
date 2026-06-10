@@ -49,7 +49,8 @@ ai-auto-merge is complementary to a merge queue, not a replacement for one: poin
 ## Features
 
 **Resolution**
-- Dual-strategy resolution: a conservative pass (preserve both sides) and a synthesis pass (cleanest unified result) run independently. Agreement means high confidence with no further cost; disagreement is settled by a fast judge model.
+- Adaptive, token-efficient pipeline: one resolution pass plus a cheap independent verifier on the common case; it escalates to a second full strategy and a judge model only when the verifier has doubts. Quality is preserved by always cross-checking; cost is roughly halved versus generating two full resolutions every time. A `thorough` mode is available when you want both strategies on every conflict.
+- Cost controls throughout: prompt caching shares the PR context across every file (the diff is sent once and read at roughly a tenth of the price thereafter), output ceilings are sized to each file instead of a fixed maximum, and effort is tunable.
 - Self-healing syntax gate: every resolved TypeScript, JavaScript, Python, and Go file is parsed before commit. A failure triggers one AI repair attempt with the exact error before the file is flagged for review.
 - Deterministic fast paths: additive conflicts and import-only conflicts are merged by rule, with zero AI calls. Lockfiles (`package-lock.json`, `go.sum`, `Cargo.lock`, and a dozen more) are never AI-merged; you get the exact regenerate command instead.
 - Confidence-gated auto-apply with a per-repo threshold; oversized files and high-fanout PRs are bounded to cap cost.
@@ -191,7 +192,9 @@ Set `DASHBOARD_TOKEN` in production; these endpoints then require `Authorization
 | `GITHUB_WEBHOOK_SECRET` | required | Webhook signature secret |
 | `ANTHROPIC_API_KEY` | required | Anthropic API key |
 | `ANTHROPIC_MODEL` | `claude-opus-4-8` | Model for resolution and repair |
-| `ANTHROPIC_JUDGE_MODEL` | `claude-haiku-4-5` | Model that arbitrates diverging proposals |
+| `ANTHROPIC_JUDGE_MODEL` | `claude-haiku-4-5` | Cheap model for the verifier and judge |
+| `ANTHROPIC_EFFORT` | `medium` | Thinking effort for resolution (`low`, `medium`, `high`, `max`) |
+| `RESOLUTION_MODE` | `adaptive` | `adaptive` (verify, escalate on doubt) or `thorough` (always dual-strategy) |
 | `PORT` | `3000` | HTTP port |
 | `NODE_ENV` | `development` | `development` or `production` |
 | `AUTO_APPLY_CONFIDENCE_THRESHOLD` | `high` | Minimum confidence to auto-push (`high`, `medium`, `low`) |
@@ -218,12 +221,14 @@ Per-repository overrides live in `.auto-merge.yml`; see [`.auto-merge.example.ym
 
 ## How resolution works
 
-For each conflicted file, after fast-path and lockfile filtering:
+For each conflicted file, after fast-path and lockfile filtering, in the default adaptive mode:
 
-1. Two independent resolutions are generated with adaptive thinking — conservative and synthesis. The shared prompt prefix (PR title, description, full diff, and the conflicted file) is cached, so the second call reads it at roughly a tenth of the input price.
-2. If both strategies produce identical content, the resolution is auto-applied at high confidence with no judge call.
-3. If they diverge, a fast model picks the better proposal or rejects both.
-4. The chosen resolution is syntax-checked, repaired once if needed, then gated against the learning loop before being applied.
+1. One resolution is generated with adaptive thinking. The PR context (title, description, full diff) is a separately cached block, so it is sent once per PR and read cheaply for every file and call.
+2. A cheap verifier (the judge model) independently checks the resolution: no markers left, both sides' intent preserved, code plausible. If it approves with confidence, the resolution ships — one expensive call, not two.
+3. If the verifier has any doubt, the pipeline escalates: a second strategy is generated, and if the two converge the result is high-confidence; if they diverge the judge picks the better one or rejects both.
+4. The chosen resolution is syntax-checked, repaired once if needed, then gated against the learning loop before being applied. Output ceilings are sized to the file, so a small conflict in a large file never pays for a large generation.
+
+In `thorough` mode, both strategies always run and the judge always reconciles — higher assurance, roughly double the cost.
 
 Untrusted PR content (titles, descriptions, diffs, file contents) is treated strictly as data, not instructions, and is size-capped. The decisive backstop against a wrong resolution is that every result is an ordinary commit on a PR branch that a human reviews before merge.
 
@@ -242,7 +247,7 @@ GitHub webhook (PR merged / PR synchronize / issue comment)
     |-- github: find conflicted PRs (parallel mergeability, fork filter)
     |-- git: clone PR branch, merge base, detect conflicts
     |-- services/conflictClassifier.ts   fast paths + lockfile detection
-    |-- services/conflictResolver.ts     two strategies + judge, prompt-cached
+    |-- services/conflictResolver.ts     adaptive: resolve + verify, escalate on doubt
     |-- services/syntaxCheck.ts          parse gate, AI repair on failure
     |-- services/learning.ts             adaptive gate on history
     |-- git: write resolved files, commit, push --force-with-lease

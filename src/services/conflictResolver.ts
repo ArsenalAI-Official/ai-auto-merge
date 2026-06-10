@@ -17,10 +17,13 @@ import {
   RESOLVER_SYSTEM,
   JUDGE_SYSTEM,
   REPAIR_SYSTEM,
+  VERIFY_SYSTEM,
   STRATEGIES,
   ResolutionContext,
-  buildSharedContext,
+  buildPRContext,
+  buildFileBlock,
   buildJudgePrompt,
+  buildVerifyPrompt,
   buildRepairPrompt,
 } from './prompts';
 
@@ -28,7 +31,7 @@ export { ResolutionContext } from './prompts';
 
 const client = new Anthropic({ apiKey: config.anthropic.apiKey });
 
-/** How many files are resolved concurrently per PR (each file = 2-4 API calls). */
+/** How many files are resolved concurrently per PR (each file = 1-3 API calls). */
 const FILE_CONCURRENCY = 3;
 
 // Adaptive thinking is only valid on Opus 4.6+, Sonnet 4.6+ and Fable models —
@@ -37,6 +40,25 @@ function thinkingParam(model: string): Record<string, unknown> {
   return /opus-4-[6-9]|sonnet-4-[6-9]|fable/.test(model)
     ? { thinking: { type: 'adaptive' } as never }
     : {};
+}
+
+// Effort tunes thinking-token spend; supported on Fable, Opus 4.5+, Sonnet 4.6
+// (not Haiku — sending it there 400s).
+function effortParam(model: string): Record<string, unknown> {
+  return /opus-4-[5-9]|sonnet-4-[6-9]|fable/.test(model)
+    ? { output_config: { effort: config.anthropic.effort } as never }
+    : {};
+}
+
+/**
+ * Right-size the output ceiling to the file: a resolution is roughly the size
+ * of the input, so there's no reason to allow 64k of output for a 50-line file.
+ * Bounds worst-case cost and runaway generation. ~3 chars/token is a safe
+ * overestimate for source code; +2k covers the JSON wrapper and thinking.
+ */
+function maxTokensFor(content: string): number {
+  const estimate = Math.ceil(content.length / 3) + 2_000;
+  return Math.min(64_000, Math.max(4_096, estimate));
 }
 
 function usageOf(message: unknown): ApiUsageLike | undefined {
@@ -55,12 +77,14 @@ export async function resolveConflicts(
   usage?: RunUsage
 ): Promise<ResolvedFile[]> {
   const context: ResolutionContext = { prTitle, prBody, prBranch, baseBranch, prDiff };
-  return mapLimit(conflictedFiles, FILE_CONCURRENCY, (file) => resolveFile(file, context, usage));
+  // Built once: identical for every file, so it caches across the whole PR.
+  const prContext = buildPRContext(context);
+  return mapLimit(conflictedFiles, FILE_CONCURRENCY, (file) => resolveFile(file, prContext, usage));
 }
 
 async function resolveFile(
   file: ConflictedFile,
-  context: ResolutionContext,
+  prContext: string,
   usage?: RunUsage
 ): Promise<ResolvedFile> {
   const classified = classify(file);
@@ -100,7 +124,7 @@ async function resolveFile(
           method: 'oversize',
         };
       }
-      return resolveWithJudge(classified, context, usage);
+      return resolveWithAI(classified, prContext, usage);
     }
   }
 }
@@ -133,21 +157,51 @@ interface Proposal {
   is_delete: boolean;
 }
 
-async function resolveWithJudge(
+/**
+ * Adaptive resolution. The default mode runs ONE proposal and a cheap verifier,
+ * escalating to the full dual-strategy + judge only when the verifier has
+ * doubts — which keeps an independent cross-check on every resolution while
+ * cutting the expensive second full-file generation on the common case.
+ * `thorough` mode always runs both strategies + judge.
+ */
+async function resolveWithAI(
   classified: ClassifiedConflict,
-  context: ResolutionContext,
+  prContext: string,
   usage?: RunUsage
 ): Promise<ResolvedFile> {
   const file = classified.file;
 
-  // Sequential on purpose: both proposals share a long prompt prefix (system +
-  // PR context + diff + file). Running A first writes the prompt cache; B then
-  // reads it at ~10% of the input price. Parallel requests can't share an
-  // in-flight cache write.
-  const proposalA = await runProposal(classified, context, STRATEGIES[0], usage);
-  const proposalB = await runProposal(classified, context, STRATEGIES[1], usage);
+  const proposalA = await runProposal(classified, prContext, STRATEGIES[0], usage);
 
-  // Both proposals failed — don't mistake convergence on the original content for success
+  if (config.anthropic.resolutionMode === 'adaptive' && !proposalA.needs_review) {
+    const verdict = await verifyProposal(file, proposalA.content, usage);
+    if (verdict.ok && verdict.confidence !== 'low' && proposalA.confidence !== 'low') {
+      logger.debug(`${file.path}: single proposal verified (${verdict.confidence}) — shipping`);
+      return {
+        path: file.path,
+        content: proposalA.content,
+        confidence: lowerOf(proposalA.confidence, verdict.confidence),
+        explanation: `${proposalA.explanation} (independently verified: ${verdict.reason})`,
+        needsReview: false,
+        isDelete: proposalA.is_delete,
+        method: 'ai_verified',
+      };
+    }
+    logger.debug(`${file.path}: verification inconclusive (${verdict.reason}) — escalating to dual-strategy`);
+  }
+
+  // Escalation (or thorough mode): run the second strategy and reconcile A vs B.
+  const proposalB = await runProposal(classified, prContext, STRATEGIES[1], usage);
+  return reconcile(file, proposalA, proposalB, usage);
+}
+
+/** Existing dual-strategy reconciliation: convergence → judge → winner. */
+async function reconcile(
+  file: ClassifiedConflict['file'],
+  proposalA: Proposal,
+  proposalB: Proposal,
+  usage?: RunUsage
+): Promise<ResolvedFile> {
   if (proposalA.needs_review && proposalB.needs_review) {
     return {
       path: file.path,
@@ -173,9 +227,7 @@ async function resolveWithJudge(
     };
   }
 
-  // Proposals diverge — run judge
-  logger.debug(`${file.path}: proposals diverged — running judge`);
-  const judgment = await judgeProposals(file, proposalA, proposalB, context, usage);
+  const judgment = await judgeProposals(file, proposalA, proposalB, usage);
 
   if (judgment.winner === 'neither') {
     return {
@@ -203,9 +255,14 @@ async function resolveWithJudge(
   };
 }
 
+function lowerOf(a: 'high' | 'medium' | 'low', b: 'high' | 'medium' | 'low'): 'high' | 'medium' | 'low' {
+  const rank = { high: 3, medium: 2, low: 1 };
+  return rank[a] <= rank[b] ? a : b;
+}
+
 async function runProposal(
   classified: ClassifiedConflict,
-  context: ResolutionContext,
+  prContext: string,
   strategy: (typeof STRATEGIES)[number],
   usage?: RunUsage
 ): Promise<Proposal> {
@@ -215,20 +272,21 @@ async function runProposal(
   try {
     const stream = client.messages.stream({
       model,
-      max_tokens: 64_000,
+      max_tokens: maxTokensFor(file.content),
       ...thinkingParam(model),
+      ...effortParam(model),
       system: RESOLVER_SYSTEM,
       messages: [
         {
           role: 'user',
           content: [
-            // Shared across both strategies → single cache breakpoint covers
-            // system prompt + this block. The strategy suffix varies per call.
-            {
-              type: 'text',
-              text: buildSharedContext(file, context),
-              cache_control: { type: 'ephemeral' },
-            },
+            // PR context is identical across all files → caches for the whole PR.
+            ...(prContext
+              ? [{ type: 'text' as const, text: prContext, cache_control: { type: 'ephemeral' as const } }]
+              : []),
+            // The file block is identical across both strategies → caches per file.
+            { type: 'text', text: buildFileBlock(file), cache_control: { type: 'ephemeral' } },
+            // Only the strategy instruction varies per call.
             { type: 'text', text: `${strategy.instruction}\n\nReturn JSON only.` },
           ],
         },
@@ -265,11 +323,41 @@ async function runProposal(
   }
 }
 
+/**
+ * Cheap single-proposal verifier (judge model). On any failure it returns
+ * ok=false so the caller escalates to the full dual-strategy path — a failed
+ * verification must never be mistaken for approval.
+ */
+async function verifyProposal(
+  file: ConflictedFile,
+  proposedContent: string,
+  usage?: RunUsage
+): Promise<{ ok: boolean; confidence: 'high' | 'medium' | 'low'; reason: string }> {
+  const model = config.anthropic.judgeModel;
+  try {
+    const response = await client.messages.create({
+      model,
+      max_tokens: 512,
+      system: VERIFY_SYSTEM,
+      messages: [{ role: 'user', content: buildVerifyPrompt(file, proposedContent) }],
+    });
+    recordUsage(usage, model, usageOf(response));
+    metrics.claudeCalls.inc({ model, outcome: 'ok' });
+
+    const text = response.content.find((b) => b.type === 'text');
+    if (!text || text.type !== 'text') throw new Error('No verify response');
+    return parseVerifyResponse(text.text);
+  } catch (err) {
+    metrics.claudeCalls.inc({ model, outcome: 'error' });
+    logger.warn(`${file.path}: verification failed, will escalate:`, err);
+    return { ok: false, confidence: 'low', reason: 'verifier unavailable' };
+  }
+}
+
 async function judgeProposals(
   file: ConflictedFile,
   proposalA: Proposal,
   proposalB: Proposal,
-  context: ResolutionContext,
   usage?: RunUsage
 ): Promise<{ winner: 'A' | 'B' | 'neither'; reason: string; confidence: 'high' | 'medium' | 'low' }> {
   const model = config.anthropic.judgeModel;
@@ -280,7 +368,7 @@ async function judgeProposals(
       max_tokens: 1024,
       system: JUDGE_SYSTEM,
       messages: [
-        { role: 'user', content: buildJudgePrompt(file, context.prTitle, proposalA.content, proposalB.content) },
+        { role: 'user', content: buildJudgePrompt(file, proposalA.content, proposalB.content) },
       ],
     });
     recordUsage(usage, model, usageOf(response));
@@ -316,8 +404,9 @@ export async function repairResolution(
   try {
     const stream = client.messages.stream({
       model,
-      max_tokens: 64_000,
+      max_tokens: maxTokensFor(brokenContent),
       ...thinkingParam(model),
+      ...effortParam(model),
       system: REPAIR_SYSTEM,
       messages: [{ role: 'user', content: buildRepairPrompt(filePath, brokenContent, syntaxError) }],
     });
@@ -368,6 +457,23 @@ function isValidResolverResponse(obj: unknown): obj is RawResolverResponse {
     typeof r.explanation === 'string' &&
     typeof r.needs_review === 'boolean'
   );
+}
+
+function parseVerifyResponse(text: string): { ok: boolean; confidence: 'high' | 'medium' | 'low'; reason: string } {
+  // Default to ok=false (escalate) on anything unparseable — never approve by accident.
+  let json: { ok?: unknown; confidence?: unknown; reason?: unknown };
+  try {
+    json = extractJson(text) as typeof json;
+  } catch {
+    return { ok: false, confidence: 'low', reason: 'could not parse verifier response' };
+  }
+  return {
+    ok: json.ok === true,
+    confidence: ['high', 'medium', 'low'].includes(json.confidence as string)
+      ? (json.confidence as 'high' | 'medium' | 'low')
+      : 'low',
+    reason: typeof json.reason === 'string' ? json.reason : '',
+  };
 }
 
 function parseJudgeResponse(text: string): { winner: 'A' | 'B' | 'neither'; reason: string; confidence: 'high' | 'medium' | 'low' } {

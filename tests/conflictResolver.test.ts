@@ -1,17 +1,30 @@
-// Shared mock state — tests mutate finalMessage per-case
+// Shared mock state. `finalMessage` backs the Opus stream (proposals/repair);
+// `create` backs the Haiku verifier and judge; `stream` is shared so tests can
+// inspect the request args (e.g. max_tokens). Tests set responses per-case.
 const mockFinalMessage = jest.fn();
+const mockCreate = jest.fn();
+const mockStream = jest.fn((_args?: { max_tokens?: number }) => ({ finalMessage: mockFinalMessage }));
 
 jest.mock('@anthropic-ai/sdk', () => ({
   __esModule: true,
   default: jest.fn().mockImplementation(() => ({
     messages: {
-      stream: jest.fn().mockReturnValue({ finalMessage: mockFinalMessage }),
-      create: jest.fn().mockResolvedValue({
-        content: [{ type: 'text', text: JSON.stringify({ winner: 'A', reason: 'A is better', confidence: 'high' }) }],
-      }),
+      stream: mockStream,
+      create: mockCreate,
     },
   })),
 }));
+
+// Verifier approval / rejection and judge verdict helpers.
+function verifyOk() {
+  return { content: [{ type: 'text', text: JSON.stringify({ ok: true, confidence: 'high', reason: 'looks correct' }) }] };
+}
+function verifyDoubt() {
+  return { content: [{ type: 'text', text: JSON.stringify({ ok: false, confidence: 'low', reason: 'unsure' }) }] };
+}
+function judgeWinnerA() {
+  return { content: [{ type: 'text', text: JSON.stringify({ winner: 'A', reason: 'A is better', confidence: 'high' }) }] };
+}
 
 import { resolveConflicts, repairResolution } from '../src/services/conflictResolver';
 import { ConflictedFile } from '../src/types';
@@ -105,24 +118,63 @@ describe('import-only conflict fast-path', () => {
   });
 });
 
-// ─── Complex conflicts: multi-proposal pipeline ───────────────────────────────
+// ─── Complex conflicts: adaptive pipeline (default mode) ──────────────────────
 
-describe('complex modify-modify conflict', () => {
-  beforeEach(() => mockFinalMessage.mockReset());
-
-  it('calls Claude for each proposal', async () => {
-    mockFinalMessage.mockResolvedValue(makeClaudeResponse({}));
-    await resolveConflicts([COMPLEX_FILE], 'feat', null, 'feat', 'main');
-    // Two proposals (conservative + synthesis)
-    expect(mockFinalMessage).toHaveBeenCalledTimes(2);
+describe('complex modify-modify conflict (adaptive)', () => {
+  beforeEach(() => {
+    mockFinalMessage.mockReset();
+    mockCreate.mockReset();
   });
 
-  it('returns high confidence when both proposals converge', async () => {
-    // Both proposals return identical content
-    mockFinalMessage.mockResolvedValue(makeClaudeResponse({ resolved_content: 'identical result' }));
+  it('ships a single verified proposal with ONE Opus call (the efficiency win)', async () => {
+    mockFinalMessage.mockResolvedValue(makeClaudeResponse({ resolved_content: 'clean merge' }));
+    mockCreate.mockResolvedValue(verifyOk());
+
     const results = await resolveConflicts([COMPLEX_FILE], 'feat', null, 'feat', 'main');
+
+    expect(mockFinalMessage).toHaveBeenCalledTimes(1); // one proposal, not two
+    expect(mockCreate).toHaveBeenCalledTimes(1); // one cheap verify
+    expect(results[0].method).toBe('ai_verified');
+    expect(results[0].needsReview).toBe(false);
+    expect(results[0].content).toBe('clean merge');
+  });
+
+  it('escalates to the second strategy when the verifier has doubts', async () => {
+    mockFinalMessage
+      .mockResolvedValueOnce(makeClaudeResponse({ resolved_content: 'A result' }))
+      .mockResolvedValueOnce(makeClaudeResponse({ resolved_content: 'B result' }));
+    mockCreate
+      .mockResolvedValueOnce(verifyDoubt()) // verify A → escalate
+      .mockResolvedValueOnce(judgeWinnerA()); // judge picks A
+
+    const results = await resolveConflicts([COMPLEX_FILE], 'feat', null, 'feat', 'main');
+
+    expect(mockFinalMessage).toHaveBeenCalledTimes(2); // escalated to dual-strategy
+    expect(results[0].method).toBe('ai_judged');
+    expect(results[0].content).toBe('A result');
+  });
+
+  it('skips the judge when escalated proposals converge', async () => {
+    mockFinalMessage.mockResolvedValue(makeClaudeResponse({ resolved_content: 'identical result' }));
+    mockCreate.mockResolvedValue(verifyDoubt()); // force escalation; A and B then converge
+
+    const results = await resolveConflicts([COMPLEX_FILE], 'feat', null, 'feat', 'main');
+
     expect(results[0].confidence).toBe('high');
+    expect(results[0].method).toBe('ai_converged');
     expect(results[0].content).toBe('identical result');
+  });
+
+  it('caps output tokens to the file size rather than the 64k ceiling', async () => {
+    mockStream.mockClear();
+    mockFinalMessage.mockResolvedValue(makeClaudeResponse({}));
+    mockCreate.mockResolvedValue(verifyOk());
+
+    await resolveConflicts([COMPLEX_FILE], 'feat', null, 'feat', 'main');
+
+    const maxTokens = mockStream.mock.calls[0][0]?.max_tokens ?? 0;
+    expect(maxTokens).toBeLessThan(64_000);
+    expect(maxTokens).toBeGreaterThanOrEqual(4_096);
   });
 
   it('falls back to needs_review on SDK error', async () => {
@@ -130,6 +182,7 @@ describe('complex modify-modify conflict', () => {
     const results = await resolveConflicts([COMPLEX_FILE], 'feat', null, 'feat', 'main');
     expect(results[0].needsReview).toBe(true);
     expect(results[0].confidence).toBe('low');
+    expect(results[0].method).toBe('ai_failed');
   });
 });
 
@@ -184,10 +237,14 @@ describe('repairResolution', () => {
 });
 
 describe('multiple files in one call', () => {
-  beforeEach(() => mockFinalMessage.mockReset());
+  beforeEach(() => {
+    mockFinalMessage.mockReset();
+    mockCreate.mockReset();
+  });
 
   it('resolves all files and returns one result per file', async () => {
     mockFinalMessage.mockResolvedValue(makeClaudeResponse({}));
+    mockCreate.mockResolvedValue(verifyOk());
     const results = await resolveConflicts(
       [ADDITIVE_FILE, IMPORT_FILE, COMPLEX_FILE],
       'feat', null, 'feat', 'main'

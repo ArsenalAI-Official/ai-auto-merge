@@ -4,7 +4,7 @@
  */
 
 import { isSafeRefName, isSafeOwnerOrRepo, isSafeRepoPath } from '../src/services/gitOps';
-import { buildSharedContext } from '../src/services/prompts';
+import { buildPRContext } from '../src/services/prompts';
 
 describe('git ref name validation', () => {
   it('accepts ordinary branch names', () => {
@@ -68,17 +68,15 @@ describe('repo path containment', () => {
 
 describe('prompt input caps', () => {
   it('truncates oversized PR titles and bodies before they reach Claude', () => {
-    const prompt = buildSharedContext(
-      { path: 'a.ts', content: 'x' },
-      {
-        prTitle: 'T'.repeat(10_000),
-        prBody: 'B'.repeat(100_000),
-        prBranch: 'feat',
-        baseBranch: 'main',
-      }
-    );
-    const titleLine = prompt.split('\n').find((l) => l.startsWith('PR Title:'))!;
-    const bodyLine = prompt.split('\n').find((l) => l.startsWith('PR Description:'))!;
+    const prompt = buildPRContext({
+      prTitle: 'T'.repeat(10_000),
+      prBody: 'B'.repeat(100_000),
+      prBranch: 'feat',
+      baseBranch: 'main',
+    });
+    const lines = prompt.split('\n');
+    const titleLine = lines.find((l: string) => l.startsWith('PR Title:'))!;
+    const bodyLine = lines.find((l: string) => l.startsWith('PR Description:'))!;
     expect(titleLine.length).toBeLessThanOrEqual(320);
     expect(bodyLine.length).toBeLessThanOrEqual(4_050);
   });
