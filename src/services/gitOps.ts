@@ -11,6 +11,18 @@ export interface GitContext {
   cleanup: () => Promise<void>;
 }
 
+/**
+ * GitHub git-over-HTTPS expects Basic auth with username `x-access-token` and
+ * the installation token as the password — NOT `Authorization: token <t>`
+ * (that form is for the REST API and yields "invalid credentials" from git).
+ * Sent via http.extraHeader so the token never lands in the URL, reflog, or
+ * process listing.
+ */
+function authHeader(token: string): string {
+  const basic = Buffer.from(`x-access-token:${token}`).toString('base64');
+  return `Authorization: Basic ${basic}`;
+}
+
 // ─── Input validation ──────────────────────────────────────────────────────────
 // Owner/repo/branch values originate in webhook payloads and API responses.
 // GitHub already constrains them, but these are the strings we hand to git —
@@ -88,7 +100,7 @@ export async function cloneRepo(
     '--branch', branch,
     '--single-branch',
     '--no-tags',
-    '--config', `http.extraHeader=Authorization: token ${token}`,
+    '--config', `http.extraHeader=${authHeader(token)}`,
     '--config', 'core.symlinks=false',
   ]);
 
@@ -97,7 +109,7 @@ export async function cloneRepo(
   await repoGit.addConfig('user.email', 'ai-auto-merge[bot]@users.noreply.github.com');
   await repoGit.addConfig('user.name', 'ai-auto-merge[bot]');
   // Keep auth available for the fetch/push steps
-  await repoGit.addConfig('http.extraHeader', `Authorization: token ${token}`);
+  await repoGit.addConfig('http.extraHeader', authHeader(token));
 
   return {
     git: repoGit,
@@ -112,7 +124,7 @@ export async function fetchAndMergeBase(
   token: string,
   remoteUrl: string
 ): Promise<{ hasConflicts: boolean; conflictedFiles: string[] }> {
-  await ctx.git.addConfig('http.extraHeader', `Authorization: token ${token}`);
+  await ctx.git.addConfig('http.extraHeader', authHeader(token));
   await ctx.git.fetch(remoteUrl, baseBranch);
 
   try {

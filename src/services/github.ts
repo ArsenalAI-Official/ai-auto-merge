@@ -5,24 +5,29 @@ import { logger } from '../utils/logger';
 import { mapLimit } from '../utils/async';
 import { PRInfo } from '../types';
 
-// @octokit/app v15+ is ESM-only; this project compiles to CommonJS. A plain
-// `import` becomes `require()` and crashes at boot (no "require" export
-// condition). The Function wrapper keeps `import()` dynamic so Node loads the
-// ESM module natively from CJS.
+// @octokit/app and @octokit/rest are ESM-only; this project compiles to
+// CommonJS. A plain `import` becomes `require()` and crashes at boot (no
+// "require" export condition). The Function wrapper keeps `import()` dynamic so
+// Node loads the ESM modules natively from CJS.
 const dynamicImport = new Function('specifier', 'return import(specifier)') as (
   specifier: string
-) => Promise<typeof import('@octokit/app')>;
+) => Promise<unknown>;
 
 let githubApp: App | undefined;
 
 /** Load the ESM Octokit App and construct the singleton. Call once at boot. */
 export async function initGithubApp(): Promise<App> {
   if (!githubApp) {
-    const { App: OctokitApp } = await dynamicImport('@octokit/app');
+    const { App: OctokitApp } = (await dynamicImport('@octokit/app')) as typeof import('@octokit/app');
+    // The App's default installation client is @octokit/core, which has NO REST
+    // namespaces (.pulls/.issues/.repos). Hand it the @octokit/rest Octokit so
+    // installation clients expose the REST methods this codebase calls.
+    const { Octokit: RestOctokit } = (await dynamicImport('@octokit/rest')) as typeof import('@octokit/rest');
     githubApp = new OctokitApp({
       appId: config.github.appId,
       privateKey: config.github.privateKey,
       webhooks: { secret: config.github.webhookSecret },
+      Octokit: RestOctokit,
     });
   }
   return githubApp;
@@ -42,12 +47,14 @@ export async function getInstallationOctokit(installationId: number): Promise<Oc
 
 export async function getInstallationToken(installationId: number): Promise<string> {
   const app = getGithubApp();
-  const octokit = (await app.getInstallationOctokit(installationId)) as unknown as Octokit;
-  const { data } = await octokit.request(
-    'POST /app/installations/{installation_id}/access_tokens',
-    { installation_id: installationId }
-  );
-  return data.token;
+  const octokit = await app.getInstallationOctokit(installationId);
+  // The installation client already manages an installation token; ask its auth
+  // hook for the current one. (Minting via POST /access_tokens needs app-JWT
+  // auth, not installation auth, so doing it through this client is wrong.)
+  const auth = (await (octokit as unknown as { auth: (o: object) => Promise<unknown> }).auth({
+    type: 'installation',
+  })) as { token: string };
+  return auth.token;
 }
 
 // GitHub computes `mergeable` lazily — poll until it's non-null or we time out.
