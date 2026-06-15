@@ -1,10 +1,42 @@
 import dotenv from 'dotenv';
+import * as fs from 'fs';
 dotenv.config();
 
 function requireEnv(key: string): string {
   const val = process.env[key];
   if (!val) throw new Error(`Missing required env var: ${key}`);
   return val;
+}
+
+/**
+ * Load the GitHub App private key. Two ways, in priority order:
+ *   1. GITHUB_PRIVATE_KEY_PATH — path to the downloaded .pem (recommended;
+ *      avoids the error-prone job of escaping a multi-line key into .env).
+ *   2. GITHUB_PRIVATE_KEY — the PEM inlined, with literal \n for newlines.
+ * Validates the result actually looks like a PEM so misconfiguration fails
+ * with a clear message instead of a cryptic "Invalid keyData" at first use.
+ */
+function loadPrivateKey(): string {
+  const keyPath = process.env.GITHUB_PRIVATE_KEY_PATH;
+  let key: string;
+  if (keyPath) {
+    try {
+      key = fs.readFileSync(keyPath, 'utf-8');
+    } catch (err) {
+      throw new Error(`Could not read GITHUB_PRIVATE_KEY_PATH (${keyPath}): ${(err as Error).message}`);
+    }
+  } else {
+    key = requireEnv('GITHUB_PRIVATE_KEY').replace(/\\n/g, '\n');
+  }
+  // Tests run with a stub key; only enforce the PEM shape for real deployments.
+  if (process.env.NODE_ENV === 'test') return key;
+  if (!/-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(key) || !/-----END [A-Z ]*PRIVATE KEY-----/.test(key)) {
+    throw new Error(
+      'GitHub App private key is malformed: missing PEM "-----BEGIN/END PRIVATE KEY-----" markers. ' +
+        'Easiest fix: set GITHUB_PRIVATE_KEY_PATH to the downloaded .pem file instead of inlining the key.'
+    );
+  }
+  return key;
 }
 
 function intEnv(key: string, fallback: number): number {
@@ -33,7 +65,7 @@ function providerKey(provider: 'anthropic' | 'openai', envKey: string): string {
 export const config = {
   github: {
     appId: parseInt(requireEnv('GITHUB_APP_ID'), 10),
-    privateKey: requireEnv('GITHUB_PRIVATE_KEY').replace(/\\n/g, '\n'),
+    privateKey: loadPrivateKey(),
     webhookSecret: requireEnv('GITHUB_WEBHOOK_SECRET'),
   },
   llm: {

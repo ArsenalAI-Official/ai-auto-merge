@@ -94,6 +94,11 @@ If you fork or template this repository, do a single search-and-replace of `mani
 
 ## Setup
 
+> New to GitHub Apps, or setting this up for your team? Follow the detailed,
+> step-by-step **[GitHub credential setup guide](docs/GITHUB_SETUP.md)** — it
+> covers App creation, the three credentials, installation, `.env`, tunneling,
+> and a troubleshooting table for the common errors.
+
 ### 1. Create a GitHub App
 
 Settings, Developer settings, GitHub Apps, New GitHub App.
