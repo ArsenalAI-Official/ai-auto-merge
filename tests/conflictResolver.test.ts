@@ -307,6 +307,17 @@ describe('oversized files', () => {
     expect(results[0].method).toBe('oversize');
     expect(results[0].explanation).toMatch(/too large/i);
   });
+
+  it('flags a file too large to regenerate within the model output ceiling (under the byte cap)', async () => {
+    // ~210 KB: under MAX_FILE_BYTES (256 KB) but needs > 64k output tokens to
+    // regenerate, so no model can emit it whole → flagged up front, no AI call.
+    const body = 'const x = 1;\n'.repeat(16_500); // ~210 KB
+    const big: ConflictedFile = { path: 'src/huge2.ts', content: body + COMPLEX_FILE.content };
+    const results = await resolveConflicts([big], 'feat', null, 'feat', 'main');
+    expect(mockFinalMessage).not.toHaveBeenCalled();
+    expect(results[0].method).toBe('oversize');
+    expect(results[0].explanation).toMatch(/regenerate|output tokens/i);
+  });
 });
 
 describe('repairResolution', () => {

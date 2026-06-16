@@ -40,9 +40,13 @@ const FILE_CONCURRENCY = 3;
  * Bounds worst-case cost and runaway generation. ~3 chars/token is a safe
  * overestimate for source code; +2k covers the JSON wrapper and thinking.
  */
+/** Unclamped estimate of the output tokens a whole-file resolution needs. */
+function estimateOutputTokens(content: string): number {
+  return Math.ceil(content.length / 3) + 2_000;
+}
+
 function maxTokensFor(content: string): number {
-  const estimate = Math.ceil(content.length / 3) + 2_000;
-  return Math.min(64_000, Math.max(4_096, estimate));
+  return Math.min(64_000, Math.max(4_096, estimateOutputTokens(content)));
 }
 
 // ─── Public entry point ────────────────────────────────────────────────────────
@@ -125,7 +129,9 @@ async function resolveFile(
       // whole-file resolution must fit in the model's completion limit (gpt-4o:
       // 16384) — if it can't, sending the request just earns a 400, so flag it
       // up front with an actionable message.
-      const needed = maxTokensFor(file.content);
+      // Use the UNCLAMPED estimate so a file too big for ANY model's output
+      // ceiling is flagged up front (no wasted, doomed call) — for both providers.
+      const needed = estimateOutputTokens(file.content);
       const outCap = maxOutputTokens();
       if (bytes > config.settings.maxFileBytes || needed > outCap) {
         const kb = Math.round(bytes / 1024);
