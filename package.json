@@ -1,6 +1,6 @@
 {
   "name": "ai-auto-merge",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "AI-powered GitHub App that auto-resolves merge conflicts in open PRs using Claude — with slash commands, a live dashboard, and Prometheus metrics",
   "private": true,
   "license": "MIT",
