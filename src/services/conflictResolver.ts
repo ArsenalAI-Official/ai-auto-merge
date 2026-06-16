@@ -12,6 +12,7 @@ import {
   resolveAdditive,
   resolveImports,
   lockfileHint,
+  assessPreservation,
 } from './conflictClassifier';
 import {
   RESOLVER_SYSTEM,
@@ -115,9 +116,30 @@ async function resolveFile(
           method: 'oversize',
         };
       }
-      return resolveWithAI(classified, prContext, usage);
+      return preservationGuard(classified, await resolveWithAI(classified, prContext, usage));
     }
   }
+}
+
+/**
+ * "Keep both" backstop: if the AI's resolution verbatim-picked one side and
+ * dropped the other (the "it overrode the PR's code" failure), downgrade to
+ * manual review instead of pushing it. Never alters content — only flags.
+ * Skips deletes (handled separately) and anything already flagged.
+ */
+function preservationGuard(classified: ClassifiedConflict, resolved: ResolvedFile): ResolvedFile {
+  if (resolved.needsReview || resolved.isDelete || !resolved.method?.startsWith('ai_')) return resolved;
+  const { droppedHead, droppedBase } = assessPreservation(classified.blocks, resolved.content);
+  if (!droppedHead && !droppedBase) return resolved;
+
+  const side = droppedHead ? "the PR's changes" : "the base branch's changes";
+  logger.warn(`${classified.file.path}: preservation guard tripped — resolution appears to drop ${side}`);
+  return {
+    ...resolved,
+    confidence: 'low',
+    needsReview: true,
+    explanation: `${resolved.explanation} [keep-both guard: resolution appears to drop ${side}; flagged for review rather than overriding code]`,
+  };
 }
 
 function fastResolve(

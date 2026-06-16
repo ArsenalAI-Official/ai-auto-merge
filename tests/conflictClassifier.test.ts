@@ -1,4 +1,4 @@
-import { classify, resolveAdditive, resolveImports, isLockfile, lockfileHint } from '../src/services/conflictClassifier';
+import { classify, resolveAdditive, resolveImports, isLockfile, lockfileHint, assessPreservation } from '../src/services/conflictClassifier';
 import { ConflictedFile } from '../src/types';
 
 function makeFile(content: string, isDeleteConflict = false): ConflictedFile {
@@ -125,6 +125,44 @@ describe('lockfile detection', () => {
     expect(lockfileHint('package-lock.json')).toContain('npm install');
     expect(lockfileHint('pnpm-lock.yaml')).toContain('pnpm install');
     expect(lockfileHint('go.sum')).toContain('go mod tidy');
+  });
+});
+
+describe('assessPreservation (keep-both backstop)', () => {
+  const MULTILINE = [
+    'function feature() {',
+    '<<<<<<< HEAD',
+    '  const a = computeA();',
+    '  const b = computeB();',
+    '  return a + b;',
+    '=======',
+    '  return legacy();',
+    '>>>>>>> MERGE_HEAD',
+    '}',
+  ].join('\n');
+
+  it('flags a resolution that verbatim-picked base and dropped the PR side', () => {
+    const blocks = classify(makeFile(MULTILINE)).blocks;
+    const baseOnly = 'function feature() {\n  return legacy();\n}\n';
+    const r = assessPreservation(blocks, baseOnly);
+    expect(r.droppedHead).toBe(true);
+    expect(r.droppedBase).toBe(false);
+  });
+
+  it('does NOT flag a union resolution that keeps both sides', () => {
+    const blocks = classify(makeFile(MULTILINE)).blocks;
+    const union = 'function feature() {\n  const a = computeA();\n  const b = computeB();\n  return a + b + legacy();\n}\n';
+    const r = assessPreservation(blocks, union);
+    expect(r.droppedHead).toBe(false);
+    expect(r.droppedBase).toBe(false);
+  });
+
+  it('does NOT flag a single-line same-line synthesis (below the distinctive threshold)', () => {
+    const blocks = classify(makeFile(COMPLEX_CONTENT)).blocks;
+    const synthesized = 'function process(data: string) {\n  const result = data.trim().toUpperCase();\n  return result.split(/[,;]/);\n}';
+    const r = assessPreservation(blocks, synthesized);
+    expect(r.droppedHead).toBe(false);
+    expect(r.droppedBase).toBe(false);
   });
 });
 

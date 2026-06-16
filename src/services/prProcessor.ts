@@ -84,10 +84,12 @@ export async function processMergedPR(event: MergedPREvent): Promise<void> {
     mergedBy: event.mergedBy,
   };
 
-  // Bound fan-out: a merge into a busy branch can conflict with many PRs at
-  // once, and each resolution clones a repo + makes AI calls. Unbounded
-  // parallelism would exhaust disk/sockets and trip GitHub/LLM rate limits.
-  await mapLimit(conflictedPRs, config.settings.prConcurrency, (pr) =>
+  // Resolve conflicted PRs with bounded fan-out. Default PR_CONCURRENCY=1 means
+  // strictly sequential — one PR resolved (clone → resolve → push) before the
+  // next — which is predictable and gentle on GitHub/LLM rate limits. Each PR
+  // is still independently resolved against the merged base, so order doesn't
+  // affect correctness; sequential just paces the work.
+  await mapLimit(conflictedPRs, Math.max(1, config.settings.prConcurrency), (pr) =>
     withPRLock(`${pr.repoOwner}/${pr.repoName}#${pr.number}`, () => resolveConflictsForPR(pr, trigger)).catch(
       (err) => {
         logger.error(`Failed to process PR #${pr.number}:`, err);

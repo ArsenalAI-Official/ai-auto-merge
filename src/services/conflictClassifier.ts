@@ -249,6 +249,64 @@ export function resolveImports(classified: ClassifiedConflict): string {
   });
 }
 
+// ─── "Keep both" backstop ────────────────────────────────────────────────────
+// Detect a resolution that verbatim-picked one side of a conflict and dropped
+// the other — the exact "it overrode the PR's code" failure. Deliberately
+// strict to avoid false-flagging legitimate same-line synthesis: a side counts
+// as DROPPED only when it had ≥2 distinctive lines, none of which survive, AND
+// the opposite side's distinctive lines ALL survive verbatim (i.e. a literal
+// one-side pick, not a rewrite). Returns which side(s) were dropped.
+
+const MIN_DISTINCTIVE = 2;
+
+export interface PreservationResult {
+  droppedHead: boolean; // PR side dropped (the one we care most about)
+  droppedBase: boolean; // base/main side dropped
+}
+
+function distinctiveLines(side: string[], other: string[]): string[] {
+  const norm = (l: string) => l.replace(/\r$/, '').trim();
+  const otherSet = new Set(other.map(norm));
+  return side
+    .map(norm)
+    .filter((l) => l.length >= 4 && /[A-Za-z0-9]/.test(l) && !otherSet.has(l));
+}
+
+export function assessPreservation(blocks: ConflictBlock[], resolved: string): PreservationResult {
+  const resolvedSet = new Set(resolved.split('\n').map((l) => l.replace(/\r$/, '').trim()));
+  const survives = (l: string) => resolvedSet.has(l);
+
+  let droppedHead = false;
+  let droppedBase = false;
+
+  for (const b of blocks) {
+    const headUnique = distinctiveLines(b.head, b.base);
+    const baseUnique = distinctiveLines(b.base, b.head);
+
+    // PR (head) dropped: head had real distinctive content, none survived, and
+    // the base side survived verbatim → a literal "took base, dropped PR" pick.
+    if (
+      headUnique.length >= MIN_DISTINCTIVE &&
+      headUnique.every((l) => !survives(l)) &&
+      baseUnique.length >= 1 &&
+      baseUnique.every(survives)
+    ) {
+      droppedHead = true;
+    }
+    // Symmetric: base/main dropped.
+    if (
+      baseUnique.length >= MIN_DISTINCTIVE &&
+      baseUnique.every((l) => !survives(l)) &&
+      headUnique.length >= 1 &&
+      headUnique.every(survives)
+    ) {
+      droppedBase = true;
+    }
+  }
+
+  return { droppedHead, droppedBase };
+}
+
 // Merge JS/TS named imports from the same module; fall back to line-level dedup
 // for other languages or import styles.
 function mergeImportLines(lines: string[]): string[] {

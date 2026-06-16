@@ -24,6 +24,12 @@ never "quietly wrong." The defenses, in order:
    auto-applied from the single-proposal path (the cheap verifier trivially
    passes an empty file). Both independent strategies must agree to delete;
    otherwise it's flagged for review.
+3a. **Keep-both backstop.** After every AI resolution, a deterministic check
+   confirms the resolution did not verbatim-pick one side and drop the other.
+   If the PR's (or the base's) distinctive lines were dropped wholesale, the
+   resolution is downgraded to manual review instead of pushed — so the bot
+   never silently overrides the PR author's code with the base branch (or vice
+   versa). Calibrated to not false-flag legitimate same-line synthesis.
 4. **Truncation is rejected.** If a model response hits the output ceiling
    (Anthropic `stop_reason=max_tokens` / OpenAI `finish_reason=length`), the
    resolution is discarded — applying a truncated file would delete everything
@@ -40,9 +46,13 @@ never "quietly wrong." The defenses, in order:
 
 ## Concurrency: how many PRs at once?
 
-- A merge into `main` can conflict with many open PRs. They are resolved with
-  **bounded concurrency** (`PR_CONCURRENCY`, default 3) via `mapLimit` — never
-  unbounded parallelism, which would exhaust disk/sockets and trip rate limits.
+- A merge into `main` can conflict with many open PRs. They are resolved
+  **sequentially by default** (`PR_CONCURRENCY=1`) — one PR fully resolved
+  (clone → resolve → push) before the next. Predictable and gentle on rate
+  limits. Raise `PR_CONCURRENCY` for parallelism on busy orgs; it's bounded via
+  `mapLimit` either way, so a merge storm never fans out unbounded. Order does
+  not affect correctness — each PR is resolved independently against the merged
+  base.
 - Each PR is **serialized against itself** by a per-PR async lock, so two
   triggers for the same PR (e.g. a merge plus a `/ai-merge`) never run two
   workspaces against one branch in a single process.

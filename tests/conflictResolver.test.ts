@@ -240,6 +240,31 @@ describe('edge-case guards', () => {
     expect(results[0].needsReview).toBe(false);
     expect(results[0].method).toBe('ai_converged');
   });
+
+  it('keep-both guard: flags a resolution that drops the PR side instead of pushing it', async () => {
+    const MULTILINE: ConflictedFile = {
+      path: 'src/feature.ts',
+      content: [
+        'function feature() {',
+        '<<<<<<< HEAD',
+        '  const a = computeA();',
+        '  const b = computeB();',
+        '  return a + b;',
+        '=======',
+        '  return legacy();',
+        '>>>>>>> MERGE_HEAD',
+        '}',
+      ].join('\n'),
+    };
+    // Model (wrongly) returns the base-only version, dropping the PR's lines.
+    mockFinalMessage.mockResolvedValue(
+      makeClaudeResponse({ resolved_content: 'function feature() {\n  return legacy();\n}\n' })
+    );
+    mockCreate.mockResolvedValue(verifyOk()); // even if the verifier is fooled, the deterministic guard catches it
+    const results = await resolveConflicts([MULTILINE], 'feat', null, 'feat', 'main');
+    expect(results[0].needsReview).toBe(true);
+    expect(results[0].explanation).toMatch(/keep-both guard/);
+  });
 });
 
 describe('lockfile conflicts', () => {

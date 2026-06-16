@@ -225,6 +225,7 @@ Set `DASHBOARD_TOKEN` in production; these endpoints then require `Authorization
 | `REDIS_URL` | unset | Enables BullMQ queueing when set |
 | `QUEUE_CONCURRENCY` | `3` | BullMQ worker concurrency |
 | `INPROCESS_CONCURRENCY` | `2` | Concurrent merge events without Redis |
+| `PR_CONCURRENCY` | `1` | Conflicted PRs resolved at once per merge (`1` = sequential, one by one) |
 
 Per-repository overrides live in `.auto-merge.yml`; see [`.auto-merge.example.yml`](.auto-merge.example.yml). Supported keys: `enabled`, `autoApplyConfidenceThreshold`, `maxFilesToAutoResolve`, `excludePaths`, `dryRun`, `autoMergeOnCIPass`.
 
