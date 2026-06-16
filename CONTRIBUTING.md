@@ -54,7 +54,7 @@ While developing, `http://localhost:3000/dashboard` shows live runs, token usage
 
 ## Commit style
 
-We use [Conventional Commits](https://www.conventionalcommits.org/). Release notes are generated from commit messages by release-please, so this matters.
+We use [Conventional Commits](https://www.conventionalcommits.org/) — it keeps history readable and makes changelogs easy to assemble if you choose to cut releases.
 
 | Prefix | Meaning |
 |---|---|
