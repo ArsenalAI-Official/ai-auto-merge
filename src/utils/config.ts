@@ -117,6 +117,13 @@ export const config = {
     maxFilesToAutoResolve: intEnv('MAX_FILES_TO_AUTO_RESOLVE', 20),
     /** Conflicted files larger than this (bytes) are never sent to the AI. */
     maxFileBytes: intEnv('MAX_FILE_BYTES', 262_144),
+    /**
+     * Attempt to resolve GitHub Actions workflow files (.github/workflows/*).
+     * Off by default: a GitHub App cannot push changes there without the
+     * `workflows` permission, so attempting it fails the push. Only enable if
+     * you granted the App that permission (and accept a bot editing CI).
+     */
+    allowWorkflowFiles: process.env.ALLOW_WORKFLOW_FILES === 'true',
     /** BullMQ worker concurrency when REDIS_URL is set. */
     queueConcurrency: intEnv('QUEUE_CONCURRENCY', 3),
     /** Concurrent PR-merge events processed in-process when Redis is absent. */

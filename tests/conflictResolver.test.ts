@@ -200,6 +200,18 @@ describe('edge-case guards', () => {
     expect(results[0].needsReview).toBe(true);
   });
 
+  it('flags GitHub Actions workflow files for review and never calls the model', async () => {
+    const wf: ConflictedFile = {
+      path: '.github/workflows/lint.yml',
+      content: ['jobs:', '<<<<<<< HEAD', '  a: 1', '=======', '  a: 2', '>>>>>>> MERGE_HEAD'].join('\n'),
+    };
+    const results = await resolveConflicts([wf], 'feat', null, 'feat', 'main');
+    expect(mockFinalMessage).not.toHaveBeenCalled();
+    expect(results[0].method).toBe('workflow');
+    expect(results[0].needsReview).toBe(true);
+    expect(results[0].explanation).toMatch(/workflows.*permission/i);
+  });
+
   it('rejects a truncated resolution rather than applying a partial file', async () => {
     // Proposal A truncated, then escalates; B also truncated → ai_failed.
     mockFinalMessage.mockResolvedValue({

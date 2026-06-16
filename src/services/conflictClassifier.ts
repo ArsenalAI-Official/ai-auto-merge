@@ -32,6 +32,13 @@ export function isLockfile(filePath: string): boolean {
   return base in LOCKFILE_HINTS;
 }
 
+// GitHub Actions workflow files live directly under .github/workflows/. A
+// GitHub App cannot push changes to them without the `workflows` permission,
+// so by default we never try — we flag them for manual resolution instead.
+export function isWorkflowFile(filePath: string): boolean {
+  return /^\.github\/workflows\/[^/]+\.ya?ml$/i.test(filePath);
+}
+
 export function lockfileHint(filePath: string): string {
   const base = filePath.split('/').pop()?.toLowerCase() ?? '';
   const cmd = LOCKFILE_HINTS[base];

@@ -191,6 +191,8 @@ On a real deployment, set the Webhook URL to your server's public HTTPS address
 | Nothing happens after a PR merges | The App is not installed on that repo (Step 3), or you did not subscribe to the **Pull request** event (Step 1). |
 | `/ai-merge` comments are ignored | Subscribe the App to **Issue comment** events and grant Issues: Read and write. |
 | Events ignored when using `gh webhook forward` | Repo-level webhook forwarding omits the `installation` object the App relies on. Use the App's own webhook via an ngrok URL instead. |
+| Commit status shows "AI conflict resolution failed unexpectedly" and a conflicted file is under `.github/workflows/` | A GitHub App can't push to workflow files without the `workflows` permission. By default the bot now flags such files for manual review instead of failing — make sure you're on a current build. To let it resolve them, grant the App the `workflows` permission and set `ALLOW_WORKFLOW_FILES=true`. |
+| Webhook deliveries show `403` under the App's Advanced tab | The App's **Webhook URL** is wrong (e.g. set to a github.com page, or a stale tunnel URL). Set it to your server/tunnel URL + `/webhook`. Note: this is the **App's** webhook (App settings), not a repository webhook. |
 | `health` shows the wrong provider/model | Check `LLM_PROVIDER` and the matching `*_API_KEY` / `*_MODEL` in `.env`. |
 
 ---

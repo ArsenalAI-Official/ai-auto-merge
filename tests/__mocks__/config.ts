@@ -33,6 +33,7 @@ export const config = {
     autoApplyConfidenceThreshold: 'high' as const,
     maxFilesToAutoResolve: 20,
     maxFileBytes: 262_144,
+    allowWorkflowFiles: false,
     queueConcurrency: 3,
     inProcessConcurrency: 2,
     prConcurrency: 3,

@@ -13,12 +13,14 @@ maxFilesToAutoResolve: 20
 
 # Glob patterns for files that should never be auto-resolved.
 # Resolutions for these files will always be flagged for manual review.
+# Note: lockfiles and .github/workflows/* are ALREADY handled automatically
+# (lockfiles get a regenerate hint; workflow files are flagged because a GitHub
+# App can't push them without the `workflows` permission) — you don't need to
+# list those here. Add your own sensitive/generated paths.
 excludePaths:
-  - "package-lock.json"
-  - "yarn.lock"
-  - "pnpm-lock.yaml"
   - "*.generated.ts"
   - "migrations/**"
+  - "infra/**"
 
 # When true, post a PR comment showing proposed resolutions but do NOT push.
 # Useful for testing ai-auto-merge on a repo before fully enabling it.

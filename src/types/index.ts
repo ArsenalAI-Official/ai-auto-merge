@@ -23,6 +23,7 @@ export type ResolutionMethod =
   | 'fast_additive'
   | 'fast_imports'
   | 'lockfile'
+  | 'workflow'
   | 'oversize'
   | 'binary'
   | 'ai_verified'

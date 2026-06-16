@@ -13,6 +13,7 @@ import {
   resolveImports,
   lockfileHint,
   assessPreservation,
+  isWorkflowFile,
 } from './conflictClassifier';
 import {
   RESOLVER_SYSTEM,
@@ -68,6 +69,22 @@ async function resolveFile(
 ): Promise<ResolvedFile> {
   const classified = classify(file);
   logger.info(`${file.path}: conflict type = ${classified.type}`);
+
+  // GitHub Actions workflow files: a GitHub App can't push to .github/workflows/
+  // without the `workflows` permission, so resolving one only to have the push
+  // rejected would fail the whole run. Skip the AI entirely (no wasted tokens)
+  // and flag for manual review — unless the operator opted in.
+  if (isWorkflowFile(file.path) && !config.settings.allowWorkflowFiles) {
+    return {
+      path: file.path,
+      content: file.content,
+      confidence: 'low',
+      explanation:
+        'GitHub Actions workflow file — a GitHub App cannot push changes here without the `workflows` permission. Resolve manually, or grant that permission and set ALLOW_WORKFLOW_FILES=true.',
+      needsReview: true,
+      method: 'workflow',
+    };
+  }
 
   switch (classified.type) {
     case 'lockfile':

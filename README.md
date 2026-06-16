@@ -52,7 +52,7 @@ ai-auto-merge is complementary to a merge queue, not a replacement for one: poin
 - Adaptive, token-efficient pipeline: one resolution pass plus a cheap independent verifier on the common case; it escalates to a second full strategy and a judge model only when the verifier has doubts. Quality is preserved by always cross-checking; cost is roughly halved versus generating two full resolutions every time. A `thorough` mode is available when you want both strategies on every conflict.
 - Cost controls throughout: prompt caching shares the PR context across every file (the diff is sent once and read at roughly a tenth of the price thereafter), output ceilings are sized to each file instead of a fixed maximum, and effort is tunable.
 - Self-healing syntax gate: every resolved TypeScript, JavaScript, Python, and Go file is parsed before commit. A failure triggers one AI repair attempt with the exact error before the file is flagged for review.
-- Deterministic fast paths: additive conflicts and import-only conflicts are merged by rule, with zero AI calls. Lockfiles (`package-lock.json`, `go.sum`, `Cargo.lock`, and a dozen more) are never AI-merged; you get the exact regenerate command instead.
+- Deterministic fast paths: additive conflicts and import-only conflicts are merged by rule, with zero AI calls. Lockfiles (`package-lock.json`, `go.sum`, `Cargo.lock`, and a dozen more) are never AI-merged; you get the exact regenerate command instead. GitHub Actions workflow files (`.github/workflows/*`) are also flagged for manual review by default, since a GitHub App can't push to them without the `workflows` permission.
 - Confidence-gated auto-apply with a per-repo threshold; oversized files and high-fanout PRs are bounded to cap cost.
 
 **Adaptive learning** (unique to this project)
@@ -211,6 +211,7 @@ Set `DASHBOARD_TOKEN` in production; these endpoints then require `Authorization
 | `AUTO_APPLY_CONFIDENCE_THRESHOLD` | `high` | Minimum confidence to auto-push (`high`, `medium`, `low`) |
 | `MAX_FILES_TO_AUTO_RESOLVE` | `20` | Skip PRs with more conflicted files than this |
 | `MAX_FILE_BYTES` | `262144` | Files larger than this are flagged, not sent to the AI |
+| `ALLOW_WORKFLOW_FILES` | `false` | Attempt to resolve `.github/workflows/*` files — only if the App has the `workflows` permission |
 | `AUTO_MERGE_ON_CI_PASS` | `false` | Arm GitHub auto-merge after a fully clean resolution |
 | `AUTO_MERGE_METHOD` | `SQUASH` | `MERGE`, `SQUASH`, or `REBASE` |
 | `LEARNING_ENABLED` | `true` | Enable the adaptive learning loop |

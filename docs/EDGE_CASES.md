@@ -37,6 +37,11 @@ never "quietly wrong." The defenses, in order:
 5. **Empty resolutions are rejected** for non-deletes.
 6. **Binary files are never sent to the model** (NUL-byte detection) — flagged
    for manual resolution.
+6a. **Workflow files are flagged, not pushed.** A GitHub App cannot push to
+   `.github/workflows/*` without the `workflows` permission, so attempting it
+   would fail the push. By default those files are skipped (no AI tokens spent)
+   and flagged for manual review with a clear reason. Set
+   `ALLOW_WORKFLOW_FILES=true` only if you granted the App that permission.
 7. **Syntax gate + one AI repair** before commit; failures downgrade to review.
 8. **`--force-with-lease`**: if the author pushed during resolution, git refuses
    the push and the run is recorded as a clean *skip*, not an error — their work
