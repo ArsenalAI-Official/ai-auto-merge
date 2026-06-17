@@ -39,14 +39,21 @@ function sleep(ms: number): Promise<void> {
 }
 `;
 
+// Default mode is hunk-level: the resolve prompt asks for ONLY the replacement
+// of the conflicted region (the sleep line), not the whole file. The stub
+// returns the right shape for whichever prompt it receives.
+const HUNK = '      await sleep(1000 * 2 ** i + Math.random() * 500);';
+const isHunkPrompt = (sys) => (sys || '').includes('ONE git merge-conflict region');
+
 let resolveHits = 0, judgeHits = 0;
 // Stub the OpenAI HTTP endpoint.
 global.fetch = async (url, init) => {
   const body = JSON.parse(init.body);
   const isResolve = body.model === 'gpt-4o';
   if (isResolve) resolveHits++; else judgeHits++;
+  const system = (body.messages && body.messages[0] && body.messages[0].content) || '';
   const content = isResolve
-    ? JSON.stringify({ resolved_content: COMBINED, is_delete: false, confidence: 'high', explanation: 'combined backoff and jitter', needs_review: false })
+    ? JSON.stringify({ resolved_content: isHunkPrompt(system) ? HUNK : COMBINED, is_delete: false, confidence: 'high', explanation: 'combined backoff and jitter', needs_review: false })
     : JSON.stringify({ ok: true, confidence: 'high', reason: 'both intents preserved, no markers' });
   return {
     ok: true,
@@ -121,7 +128,7 @@ function sleep(ms: number): Promise<void> { return new Promise((r) => setTimeout
   const [r] = await resolveConflicts(conflicted, 'feat: backoff', 'Add exponential backoff.', 'feature/backoff', 'main', undefined, usage);
 
   check('OpenAI endpoint was called (resolve + verify)', resolveHits === 1 && judgeHits === 1, `(resolve=${resolveHits}, judge=${judgeHits})`);
-  check('verified, auto-applicable resolution', r.method === 'ai_verified' && !r.needsReview, `(method=${r.method})`);
+  check('verified, auto-applicable resolution', r.method === 'ai_hunk' && !r.needsReview, `(method=${r.method})`);
   check('combined both intents', r.content.includes('2 ** i') && r.content.includes('Math.random'));
   check('TypeScript passes the real syntax gate', (await checkSyntax('src/retry.ts', r.content, ctx.dir)).valid);
   check('cost accounting used OpenAI gpt-4o pricing', usage.apiCalls === 2 && usage.costUsd > 0, `($${usage.costUsd.toFixed(4)})`);
