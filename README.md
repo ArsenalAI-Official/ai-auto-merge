@@ -49,8 +49,9 @@ ai-auto-merge is complementary to a merge queue, not a replacement for one: poin
 ## Features
 
 **Resolution**
+- Hunk-level resolution by default (the approach Cursor and Claude Code use): the model is sent only each conflict region with a little surrounding context and returns only the replacement for that region, which is spliced back into the verbatim rest of the file. The unchanged bulk of a file is never regenerated, so there is no whole-file output-size ceiling — a one-line conflict in a several-thousand-line file resolves fine — and output tokens drop sharply on large files. Set `RESOLUTION_GRANULARITY=file` to regenerate whole files instead; either way it falls back to whole-file automatically when conflict markers can't be cleanly parsed.
 - Adaptive, token-efficient pipeline: one resolution pass plus a cheap independent verifier on the common case; it escalates to a second full strategy and a judge model only when the verifier has doubts. Quality is preserved by always cross-checking; cost is roughly halved versus generating two full resolutions every time. A `thorough` mode is available when you want both strategies on every conflict.
-- Cost controls throughout: prompt caching shares the PR context across every file (the diff is sent once and read at roughly a tenth of the price thereafter), output ceilings are sized to each file instead of a fixed maximum, and effort is tunable.
+- Cost controls throughout: prompt caching shares the PR context across every file (the diff is sent once and read at roughly a tenth of the price thereafter), output ceilings are sized to each unit (hunk or file) instead of a fixed maximum, and effort is tunable.
 - Self-healing syntax gate: every resolved TypeScript, JavaScript, Python, and Go file is parsed before commit. A failure triggers one AI repair attempt with the exact error before the file is flagged for review.
 - Deterministic fast paths: additive conflicts and import-only conflicts are merged by rule, with zero AI calls. Lockfiles (`package-lock.json`, `go.sum`, `Cargo.lock`, and a dozen more) are never AI-merged; you get the exact regenerate command instead. GitHub Actions workflow files (`.github/workflows/*`) are also flagged for manual review by default, since a GitHub App can't push to them without the `workflows` permission.
 - Confidence-gated auto-apply with a per-repo threshold; oversized files and high-fanout PRs are bounded to cap cost.
@@ -205,8 +206,10 @@ Set `DASHBOARD_TOKEN` in production; these endpoints then require `Authorization
 | `OPENAI_MODEL` | `gpt-4o` | Resolution model (any chat-completions model your key allows) |
 | `OPENAI_JUDGE_MODEL` | `gpt-4o-mini` | Cheap model for the verifier and judge |
 | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Override for Azure OpenAI or OpenAI-compatible gateways |
-| `OPENAI_MAX_OUTPUT_TOKENS` | `16384` | Your OpenAI model's completion limit. Requests are clamped to it; files needing more output are flagged. Raise for models that allow more |
+| `OPENAI_MAX_OUTPUT_TOKENS` | `16384` | Your OpenAI model's completion limit. Requests are clamped to it. With hunk-level resolution (the default) only small conflict regions are generated, so large files are unaffected; in `file` mode, files needing more output are flagged. Raise for models that allow more |
 | `RESOLUTION_MODE` | `adaptive` | `adaptive` (verify, escalate on doubt) or `thorough` (always dual-strategy) |
+| `RESOLUTION_GRANULARITY` | `auto` | `auto`/`hunk` resolve only conflict regions and splice them into the verbatim file (no whole-file size ceiling, far fewer tokens); `file` regenerates the whole file. All fall back to whole-file when markers can't be cleanly parsed |
+| `HUNK_CONTEXT_LINES` | `12` | Lines of surrounding context sent with each conflict hunk (each side) |
 | `PORT` | `3000` | HTTP port |
 | `NODE_ENV` | `development` | `development` or `production` |
 | `AUTO_APPLY_CONFIDENCE_THRESHOLD` | `high` | Minimum confidence to auto-push (`high`, `medium`, `low`) |

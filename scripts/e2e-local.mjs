@@ -26,7 +26,7 @@ process.env.ANTHROPIC_API_KEY ||= 'sk-ant-dummy-not-used';
 process.env.NODE_ENV ||= 'production'; // quiet logs
 
 const gitOps = await import('../dist/services/gitOps.js');
-const { classify } = await import('../dist/services/conflictClassifier.js');
+const { classify, extractHunks, spliceHunks } = await import('../dist/services/conflictClassifier.js');
 const { resolveConflicts } = await import('../dist/services/conflictResolver.js');
 
 let pass = 0;
@@ -190,11 +190,100 @@ function testClassifierRouting() {
   console.log('    -> this is the only conflict class that consumes Anthropic tokens.');
 }
 
+// ─── Scenario D: hunk-level splice against a REAL git conflict ───────────────────
+// A multi-line file with stable code around one conflicting line. Proves the new
+// extractHunks()/spliceHunks() path parses git's ACTUAL markers, replaces only
+// the conflict region, keeps every other line verbatim, and yields a file that
+// merges cleanly — all without an API key.
+async function testHunkSpliceRealGit() {
+  section('D. Hunk-level splice against a REAL git conflict (no API)');
+
+  const bare = path.join(tmpRoot, 'origin-hunk.git');
+  const seed = path.join(tmpRoot, 'seed-hunk');
+  fs.mkdirSync(bare);
+  git(tmpRoot, 'init', '--bare', '-b', 'main', bare);
+  git(tmpRoot, 'clone', bare, seed);
+  git(seed, 'config', 'user.email', 't@t');
+  git(seed, 'config', 'user.name', 't');
+
+  const file = (value) =>
+    [
+      'export const config = {',
+      '  name: "service",',
+      '  port: 8080,',
+      `  value: ${value},`,
+      '  enabled: true,',
+      '  region: "us",',
+      '};',
+      '',
+    ].join('\n');
+
+  fs.writeFileSync(path.join(seed, 'config.ts'), file('1'));
+  git(seed, 'add', '-A');
+  git(seed, 'commit', '-m', 'base');
+  git(seed, 'push', 'origin', 'main');
+
+  git(seed, 'checkout', '-b', 'pr-2');
+  fs.writeFileSync(path.join(seed, 'config.ts'), file('"from-pr"'));
+  git(seed, 'commit', '-am', 'pr: value from-pr');
+  git(seed, 'push', 'origin', 'pr-2');
+
+  git(seed, 'checkout', 'main');
+  fs.writeFileSync(path.join(seed, 'config.ts'), file('"from-main"'));
+  git(seed, 'commit', '-am', 'main: value from-main');
+  git(seed, 'push', 'origin', 'main');
+
+  const fileUrl = `file://${bare}`;
+  const ctx = await gitOps.cloneRepo(fileUrl, 'unused-token', 'pr-2');
+  const merge = await gitOps.fetchAndMergeBase(ctx, 'main', 'unused-token', fileUrl);
+  const [conflicted] = await gitOps.getConflictedFileContents(ctx, merge.conflictedFiles);
+  check('real git produced a parseable conflict', /<<<<<<<[\s\S]*=======[\s\S]*>>>>>>>/.test(conflicted.content));
+
+  // Parse the REAL conflict markers into hunks.
+  const { hunks, safe } = extractHunks(conflicted.content, 12);
+  check('extractHunks parsed the real conflict', safe && hunks.length === 1,
+    `(safe=${safe}, hunks=${hunks.length})`);
+  check('hunk captured both sides', hunks[0]?.head.join('\n').includes('from-pr') &&
+    hunks[0]?.base.join('\n').includes('from-main'));
+
+  // Splice a keep-both resolution back into the verbatim file.
+  const merged = spliceHunks(conflicted.content, new Map([[0, ['  value: "from-pr+from-main",']]]));
+  check('spliced file has no leftover markers', !/<<<<<<<|=======|>>>>>>>/.test(merged));
+  check('spliced file kept the surrounding lines verbatim',
+    merged.includes('  port: 8080,') && merged.includes('  enabled: true,') &&
+    merged.includes('  region: "us",') && merged.includes('  value: "from-pr+from-main",'),
+    `\n--- spliced ---\n${merged}\n---------------`);
+
+  // Apply the spliced resolution and prove the branch merges cleanly for real.
+  await gitOps.applyResolutions(ctx, [{ path: 'config.ts', content: merged }]);
+  const sha = await gitOps.commitAndPush(ctx, 'fix: resolve via hunk splice', 'pr-2', fileUrl, 'unused-token');
+  check('committed and pushed the hunk-spliced resolution', /^[0-9a-f]{7,40}$/.test(sha));
+  await ctx.cleanup();
+
+  const verifyDir = path.join(tmpRoot, 'verify-hunk');
+  git(tmpRoot, 'clone', '-b', 'pr-2', bare, verifyDir);
+  git(verifyDir, 'config', 'user.email', 't@t');
+  git(verifyDir, 'config', 'user.name', 't');
+  git(verifyDir, 'fetch', 'origin', 'main');
+  let merged2 = false;
+  try {
+    git(verifyDir, 'merge', 'origin/main', '--no-edit');
+    merged2 = true;
+  } catch {
+    merged2 = false;
+  }
+  check('hunk-spliced branch now merges main cleanly (resolved for real)', merged2);
+  const finalContent = fs.readFileSync(path.join(verifyDir, 'config.ts'), 'utf-8');
+  check('final pushed content has both sides and no markers',
+    finalContent.includes('from-pr+from-main') && !/<<<<<<<|>>>>>>>/.test(finalContent));
+}
+
 try {
   console.log('ai-auto-merge — local end-to-end harness (real git, no GitHub App, no API key)');
   await testGitOpsPlumbing();
   await testFastPaths();
   testClassifierRouting();
+  await testHunkSpliceRealGit();
   section('Result');
   console.log(`  ${pass} passed, ${fail} failed`);
 } finally {

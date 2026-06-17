@@ -14,6 +14,15 @@ never "quietly wrong." The defenses, in order:
    import-only resolutions reconstruct the file from a single line-based parser,
    emitting every non-conflict line unchanged. They cannot reflow or drop code
    outside the conflict region. (`conflictClassifier.ts`)
+1a. **Hunk-level AI resolution copies surrounding code verbatim too.** By default
+   (`RESOLUTION_GRANULARITY=auto`) the model is sent only each conflict region
+   plus a little context and returns only the replacement for that region; the
+   bot splices it back into the **verbatim** stable spans (same parser as the
+   fast paths). The untouched 99% of a file is never regenerated, so it cannot be
+   reflowed or dropped — the edit-not-rewrite approach Cursor/Claude Code use. A
+   replacement that still contains a conflict marker is rejected, and after
+   splicing the assembled file is re-checked for markers. Falls back to
+   whole-file resolution when markers can't be cleanly parsed (diff3/malformed).
 2. **The conflict parser is CRLF- and diff3-aware.** Markers are matched on the
    `\r`-stripped line and must be exactly 7 characters + EOL/space. A `=======`
    line counts as a separator only *inside* a conflict, so Markdown underlines
@@ -89,23 +98,24 @@ What's already in place:
 - **Prompt caching** — the PR context (incl. the diff) is one cached block sent
   once per PR and read at ~10% thereafter; the file block caches across the two
   strategy calls. (Anthropic; OpenAI auto-caches stable prefixes server-side.)
-- **Right-sized `max_tokens`** — scaled to the file, not a flat 64k.
-- **Oversize guard** — files too large to fit the output ceiling, or above
-  `MAX_FILE_BYTES`, are flagged rather than sent (avoids paying for a call that
-  is guaranteed to truncate).
+- **Hunk-level resolution (default).** A one-line conflict in a 500-line file
+  sends and regenerates only that line's region, not the whole file — output
+  tokens drop ~60–90% on large files, because the unchanged bulk is spliced in
+  verbatim, never regenerated. The per-hunk request is right-sized to the hunk
+  (a small floor, not the file size), and the per-hunk pipeline reuses the same
+  adaptive verify/escalate/judge logic. Set `RESOLUTION_GRANULARITY=file` to fall
+  back to whole-file regeneration. (`hunkResolver.ts`)
+- **Right-sized `max_tokens`** — every request is scaled to its unit (the hunk,
+  or in whole-file mode the file), never a flat 64k.
+- **Oversize guard** — a single conflicted file above `MAX_FILE_BYTES` is flagged
+  rather than pulled into memory. In whole-file mode, a file too large to fit the
+  model's output ceiling is also flagged up front (avoids a call guaranteed to
+  truncate); hunk-level mode removes that ceiling entirely, since only the small
+  conflict region is regenerated — so a large file with a small conflict now
+  resolves instead of being flagged.
 - **`effort` tunable** (Anthropic) to trade thinking tokens for cost.
 - **OpenAI 429/5xx retry** so a transient blip doesn't waste a call and bounce
   the PR to a human.
-
-Known largest remaining lever (documented, not yet implemented):
-
-- **Hunk-level resolution.** Today a one-line conflict in a 500-line file sends
-  and regenerates the whole file. Resolving only the conflicted hunks (with
-  surrounding context) and splicing them back into verbatim stable spans would
-  cut output tokens ~60–90% on large files — and would *further* reduce the
-  code-loss risk, since unchanged spans are copied, never regenerated. The
-  current line-based segmenter is the foundation for this. It is deferred
-  because it changes the model contract and needs its own careful test matrix.
 
 ## Security edges (see SECURITY.md for the full model)
 
@@ -123,4 +133,3 @@ Known largest remaining lever (documented, not yet implemented):
 - Coalesce/debounce a burst of merges into the same base to avoid O(N²)
   re-scans when many PRs auto-merge in sequence.
 - Trim the PR diff to conflicted-file hunks (token saving, esp. on OpenAI).
-- Diff-based verify/judge prompts (send hunks, not whole files).

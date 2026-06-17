@@ -77,6 +77,20 @@ export const config = {
      * thorough: always run both strategies + judge (highest assurance, ~2x cost).
      */
     resolutionMode: (process.env.RESOLUTION_MODE || 'adaptive') as 'adaptive' | 'thorough',
+    /**
+     * How much of a conflicted file is sent to the model:
+     *  - 'auto' (default): resolve ONLY each conflict hunk and splice the result
+     *    back into the untouched rest of the file — the same edit-not-rewrite
+     *    approach Cursor/Claude Code use. Removes the whole-file output-size
+     *    ceiling (large files with small conflicts now resolve) and slashes
+     *    output tokens. Falls back to whole-file automatically when a file has no
+     *    cleanly-parseable conflict blocks (diff3/malformed) or a splice fails.
+     *  - 'hunk': always attempt hunk-level (same automatic fallback).
+     *  - 'file': always regenerate the whole file (legacy behavior).
+     */
+    granularity: (process.env.RESOLUTION_GRANULARITY || 'auto') as 'auto' | 'hunk' | 'file',
+    /** Lines of surrounding context sent with each conflict hunk (each side). */
+    hunkContextLines: intEnv('HUNK_CONTEXT_LINES', 12),
   },
   anthropic: {
     apiKey: providerKey('anthropic', 'ANTHROPIC_API_KEY'),

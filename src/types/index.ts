@@ -29,6 +29,8 @@ export type ResolutionMethod =
   | 'ai_verified'
   | 'ai_converged'
   | 'ai_judged'
+  | 'ai_hunk'
+  | 'ai_hunk_review'
   | 'ai_failed';
 
 export interface ResolvedFile {

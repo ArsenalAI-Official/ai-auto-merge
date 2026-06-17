@@ -7,6 +7,8 @@ export const config = {
   llm: {
     provider: 'anthropic' as const,
     resolutionMode: 'adaptive' as const,
+    granularity: 'auto' as 'auto' | 'hunk' | 'file',
+    hunkContextLines: 12,
   },
   anthropic: {
     apiKey: 'test-anthropic-key',
