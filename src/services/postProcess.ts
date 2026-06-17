@@ -107,10 +107,15 @@ export async function runPostResolveHook(repoDir: string, cfg: RepoConfig): Prom
   logger.info(`Running postResolve hook (timeout ${cfg.postResolveTimeoutSec}s): ${command}`);
 
   return new Promise<HookResult>((resolve) => {
+    // detached: the command runs as its own process-group leader, so on timeout
+    // we can kill the WHOLE tree (e.g. an `npm ci` and everything it spawned),
+    // not just the shell — orphaned children would otherwise keep running and
+    // hold the stdio pipes open, hanging the close event.
     const child = spawn('/bin/sh', ['-c', command], {
       cwd: repoDir,
       env: scrubbedEnv(),
       stdio: ['ignore', 'pipe', 'pipe'],
+      detached: true,
     });
 
     let output = '';
@@ -120,26 +125,43 @@ export async function runPostResolveHook(repoDir: string, cfg: RepoConfig): Prom
     child.stdout?.on('data', capture);
     child.stderr?.on('data', capture);
 
+    let settled = false;
+    const finish = (result: HookResult) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill('SIGKILL');
+      killTree(child);
     }, timeoutMs);
 
-    child.on('error', (err) => {
-      clearTimeout(timer);
-      resolve({ ok: false, error: `failed to start: ${err.message}` });
-    });
+    child.on('error', (err) => finish({ ok: false, error: `failed to start: ${err.message}` }));
 
     child.on('close', (code) => {
-      clearTimeout(timer);
       if (timedOut) {
-        resolve({ ok: false, error: `timed out after ${cfg.postResolveTimeoutSec}s` });
+        finish({ ok: false, error: `timed out after ${cfg.postResolveTimeoutSec}s` });
       } else if (code === 0) {
-        resolve({ ok: true });
+        finish({ ok: true });
       } else {
-        resolve({ ok: false, error: `exited ${code}: ${output.slice(-500).trim()}` });
+        finish({ ok: false, error: `exited ${code}: ${output.slice(-500).trim()}` });
       }
     });
   });
+}
+
+/** SIGKILL the command's entire process group (negative pid), falling back to the child alone. */
+function killTree(child: { pid?: number; kill: (sig: NodeJS.Signals) => boolean }): void {
+  try {
+    if (child.pid) process.kill(-child.pid, 'SIGKILL');
+  } catch {
+    try {
+      child.kill('SIGKILL');
+    } catch {
+      /* already gone */
+    }
+  }
 }
