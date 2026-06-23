@@ -28,6 +28,14 @@ import {
   buildVerifyPrompt,
   buildRepairPrompt,
 } from './prompts';
+import { resolveByHunks } from './hunkResolver';
+import {
+  extractJson,
+  lowerOf,
+  parseResolverResponse,
+  parseVerifyResponse,
+  parseJudgeResponse,
+} from './aiParse';
 
 export { ResolutionContext } from './prompts';
 
@@ -125,25 +133,64 @@ async function resolveFile(
         };
       }
       const bytes = Buffer.byteLength(file.content, 'utf-8');
-      // Two oversize gates: the byte cap, and the model's output ceiling. A
-      // whole-file resolution must fit in the model's completion limit (gpt-4o:
-      // 16384) — if it can't, sending the request just earns a 400, so flag it
-      // up front with an actionable message.
-      // Use the UNCLAMPED estimate so a file too big for ANY model's output
-      // ceiling is flagged up front (no wasted, doomed call) — for both providers.
+      // The byte cap is a hard sanity/memory bound in EVERY mode — a conflicted
+      // file this large is never worth pulling fully into memory to resolve.
+      if (bytes > config.settings.maxFileBytes) {
+        const kb = Math.round(bytes / 1024);
+        return {
+          path: file.path,
+          content: file.content,
+          confidence: 'low',
+          explanation: `File too large for AI resolution (${kb} KB > ${Math.round(config.settings.maxFileBytes / 1024)} KB cap, MAX_FILE_BYTES). Resolve manually.`,
+          needsReview: true,
+          method: 'oversize',
+        };
+      }
+
+      // Hunk-level first (the default): resolve only the conflict regions and
+      // splice them into the untouched file. There is NO whole-file output
+      // ceiling here, so a large file with a small conflict resolves fine and
+      // far cheaper. resolveByHunks returns null when the markers can't be
+      // cleanly parsed/spliced (diff3/malformed) — then we fall through to
+      // whole-file resolution below.
+      if (shouldUseHunks(classified)) {
+        const hunked = await resolveByHunks(classified, prContext, usage);
+        if (hunked) return preservationGuard(classified, hunked);
+      }
+
+      // Whole-file resolution must fit the model's completion limit (gpt-4o:
+      // 16384) — if it can't, the request just earns a 400 (or a truncated,
+      // unsafe result), so flag it up front. Use the UNCLAMPED estimate so a
+      // file too big for ANY model's output ceiling is flagged for both providers.
       const needed = estimateOutputTokens(file.content);
       const outCap = maxOutputTokens();
-      if (bytes > config.settings.maxFileBytes || needed > outCap) {
-        const kb = Math.round(bytes / 1024);
-        const explanation =
-          needed > outCap
-            ? `File is too large for the current model to regenerate in one pass (~${needed} output tokens needed, model allows ${outCap}). Resolve manually, or switch to a model/provider with a higher output limit (e.g. Claude Opus allows 64k).`
-            : `File too large for AI resolution (${kb} KB > ${Math.round(config.settings.maxFileBytes / 1024)} KB cap, MAX_FILE_BYTES). Resolve manually.`;
-        return { path: file.path, content: file.content, confidence: 'low', explanation, needsReview: true, method: 'oversize' };
+      if (needed > outCap) {
+        return {
+          path: file.path,
+          content: file.content,
+          confidence: 'low',
+          explanation: `File is too large for the current model to regenerate in one pass (~${needed} output tokens needed, model allows ${outCap}). Keep hunk-level resolution on (RESOLUTION_GRANULARITY=auto, the default), or switch to a model/provider with a higher output limit (e.g. Claude Opus allows 64k).`,
+          needsReview: true,
+          method: 'oversize',
+        };
       }
       return preservationGuard(classified, await resolveWithAI(classified, prContext, usage));
     }
   }
+}
+
+/**
+ * Whether to attempt hunk-level resolution for this file. A delete/modify
+ * conflict is a whole-file decision (keep the file vs delete it) that hunk-level
+ * can't express, so it always uses whole-file. 'file' granularity forces
+ * whole-file for everything. Otherwise ('auto'/'hunk') we attempt hunks —
+ * resolveByHunks falls back to whole-file on its own when a file can't be
+ * cleanly hunk-spliced (diff3/malformed markers).
+ */
+function shouldUseHunks(classified: ClassifiedConflict): boolean {
+  if (config.llm.granularity === 'file') return false;
+  if (classified.type === 'delete_modify') return false;
+  return true;
 }
 
 /**
@@ -321,11 +368,6 @@ async function reconcile(
   };
 }
 
-function lowerOf(a: 'high' | 'medium' | 'low', b: 'high' | 'medium' | 'low'): 'high' | 'medium' | 'low' {
-  const rank = { high: 3, medium: 2, low: 1 };
-  return rank[a] <= rank[b] ? a : b;
-}
-
 async function runProposal(
   classified: ClassifiedConflict,
   prContext: string,
@@ -471,74 +513,4 @@ export async function repairResolution(
   }
 }
 
-// ─── Response parsers ──────────────────────────────────────────────────────────
-
-interface RawResolverResponse {
-  resolved_content: string;
-  is_delete: boolean;
-  confidence: 'high' | 'medium' | 'low';
-  explanation: string;
-  needs_review: boolean;
-}
-
-function parseResolverResponse(text: string): RawResolverResponse {
-  const json = extractJson(text);
-  if (!isValidResolverResponse(json)) {
-    throw new Error('Claude response missing required fields');
-  }
-  return json;
-}
-
-function isValidResolverResponse(obj: unknown): obj is RawResolverResponse {
-  if (typeof obj !== 'object' || obj === null) return false;
-  const r = obj as Record<string, unknown>;
-  // Empty resolved_content is only valid for a deletion — otherwise applying it
-  // would blank the file. Reject empty/whitespace content for non-deletes.
-  const contentOk =
-    typeof r.resolved_content === 'string' && (r.is_delete === true || r.resolved_content.trim().length > 0);
-  return (
-    contentOk &&
-    (r.confidence === 'high' || r.confidence === 'medium' || r.confidence === 'low') &&
-    typeof r.explanation === 'string' &&
-    typeof r.needs_review === 'boolean'
-  );
-}
-
-function parseVerifyResponse(text: string): { ok: boolean; confidence: 'high' | 'medium' | 'low'; reason: string } {
-  // Default to ok=false (escalate) on anything unparseable — never approve by accident.
-  let json: { ok?: unknown; confidence?: unknown; reason?: unknown };
-  try {
-    json = extractJson(text) as typeof json;
-  } catch {
-    return { ok: false, confidence: 'low', reason: 'could not parse verifier response' };
-  }
-  return {
-    ok: json.ok === true,
-    confidence: ['high', 'medium', 'low'].includes(json.confidence as string)
-      ? (json.confidence as 'high' | 'medium' | 'low')
-      : 'low',
-    reason: typeof json.reason === 'string' ? json.reason : '',
-  };
-}
-
-function parseJudgeResponse(text: string): { winner: 'A' | 'B' | 'neither'; reason: string; confidence: 'high' | 'medium' | 'low' } {
-  const json = extractJson(text) as { winner?: string; reason?: string; confidence?: string };
-  if (!json || !['A', 'B', 'neither'].includes(json.winner ?? '')) {
-    return { winner: 'A', reason: 'Could not parse judge response', confidence: 'medium' };
-  }
-  return {
-    winner: json.winner as 'A' | 'B' | 'neither',
-    reason: json.reason ?? '',
-    confidence: ['high', 'medium', 'low'].includes(json.confidence ?? '')
-      ? (json.confidence as 'high' | 'medium' | 'low')
-      : 'medium',
-  };
-}
-
-function extractJson(text: string): unknown {
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
-  const raw = text.match(/(\{[\s\S]*\})/);
-  const jsonStr = fenced?.[1] ?? raw?.[1];
-  if (!jsonStr) throw new Error('No JSON found in response');
-  return JSON.parse(jsonStr);
-}
+// Response parsing lives in ./aiParse (shared with hunkResolver, no cycle).

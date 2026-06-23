@@ -25,8 +25,11 @@ const path = require('node:path');
 process.env.GITHUB_APP_ID ||= '1';
 process.env.GITHUB_PRIVATE_KEY ||= 'dummy';
 process.env.GITHUB_WEBHOOK_SECRET ||= 'dummy';
-process.env.ANTHROPIC_API_KEY ||= 'sk-ant-stub';
+process.env.ANTHROPIC_API_KEY = 'sk-ant-stub';
 process.env.NODE_ENV ||= 'production';
+// Pin the provider: this harness stubs the Anthropic SDK. Without this it would
+// pick up LLM_PROVIDER=openai from a local .env and make REAL OpenAI calls.
+process.env.LLM_PROVIDER = 'anthropic';
 
 // ─── Stub the Anthropic SDK at the module boundary (no network) ─────────────────
 // The resolver does `new Anthropic().messages.stream/create`. We inject a fake
@@ -55,10 +58,17 @@ function sleep(ms: number): Promise<void> {
 }
 `;
 
+// Default mode is hunk-level: the model is asked for ONLY the replacement of the
+// conflicted region (the sleep line), not the whole file. The stub returns the
+// right shape for whichever prompt it receives, so the harness is correct in
+// both hunk and whole-file modes.
+const HUNK = '      await sleep(1000 * 2 ** i + Math.random() * 500);';
+const isHunkPrompt = (system) => (system || '').includes('ONE git merge-conflict region');
+
 function FakeAnthropic() {
   this.messages = {
     // Opus resolution proposals (streamed)
-    stream() {
+    stream(args) {
       proposalCalls++;
       return {
         finalMessage: async () => ({
@@ -66,7 +76,7 @@ function FakeAnthropic() {
           content: [{
             type: 'text',
             text: JSON.stringify({
-              resolved_content: COMBINED,
+              resolved_content: isHunkPrompt(args && args.system) ? HUNK : COMBINED,
               is_delete: false,
               confidence: 'high',
               explanation: 'Combined exponential backoff with jitter, preserving both PRs’ intent.',
@@ -172,8 +182,8 @@ function sleep(ms: number): Promise<void> {
 
   check('went through the adaptive path: 1 proposal + 1 verify (not 2 proposals)',
     proposalCalls === 1 && verifyCalls === 1, `(proposals=${proposalCalls}, verify=${verifyCalls})`);
-  check('returned an auto-applicable, verified resolution',
-    r.method === 'ai_verified' && r.confidence === 'high' && !r.needsReview, `(method=${r.method})`);
+  check('returned an auto-applicable, hunk-spliced resolution',
+    r.method === 'ai_hunk' && r.confidence === 'high' && !r.needsReview, `(method=${r.method})`);
   check('resolution combines BOTH intents (backoff AND jitter)',
     r.content.includes('2 ** i') && r.content.includes('Math.random'));
   check('no conflict markers remain', !/<<<<<<<|=======|>>>>>>>/.test(r.content));

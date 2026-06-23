@@ -1,4 +1,13 @@
-import { classify, resolveAdditive, resolveImports, isLockfile, lockfileHint, assessPreservation } from '../src/services/conflictClassifier';
+import {
+  classify,
+  resolveAdditive,
+  resolveImports,
+  isLockfile,
+  lockfileHint,
+  assessPreservation,
+  extractHunks,
+  spliceHunks,
+} from '../src/services/conflictClassifier';
 import { ConflictedFile } from '../src/types';
 
 function makeFile(content: string, isDeleteConflict = false): ConflictedFile {
@@ -192,6 +201,71 @@ describe('CRLF and diff3 handling (regression)', () => {
     const resolved = resolveAdditive(classify(makeFile(ADDITIVE_CONTENT)));
     expect(resolved).toContain('function existingFn()');
     expect(resolved).toContain('export { existingFn }');
+  });
+});
+
+describe('extractHunks() / spliceHunks() (hunk-level support)', () => {
+  const TWO_HUNK = [
+    'const top = 1;',
+    '<<<<<<< HEAD',
+    'const a = 1;',
+    '=======',
+    'const a = 2;',
+    '>>>>>>> MERGE_HEAD',
+    'const middle = 2;',
+    '<<<<<<< HEAD',
+    'const b = 1;',
+    '=======',
+    'const b = 2;',
+    '>>>>>>> MERGE_HEAD',
+    'const bottom = 3;',
+  ].join('\n');
+
+  it('extracts one hunk with both sides, context, and standard markers', () => {
+    const { hunks, safe } = extractHunks(ADDITIVE_CONTENT, 12);
+    expect(safe).toBe(true);
+    expect(hunks).toHaveLength(1);
+    expect(hunks[0].index).toBe(0);
+    expect(hunks[0].head).toContain('function featureA() {');
+    expect(hunks[0].base).toContain('function featureB() {');
+    expect(hunks[0].contextBefore).toContain('function existingFn() { return 1; }');
+    expect(hunks[0].contextAfter).toContain('export { existingFn };');
+    expect(hunks[0].markerText).toMatch(/<<<<<<< HEAD/);
+    expect(hunks[0].markerText).toMatch(/>>>>>>> MERGE_HEAD/);
+  });
+
+  it('extracts every conflict region in a multi-hunk file with sequential indices', () => {
+    const { hunks, safe } = extractHunks(TWO_HUNK, 12);
+    expect(safe).toBe(true);
+    expect(hunks.map((h) => h.index)).toEqual([0, 1]);
+    expect(hunks[0].base).toContain('const a = 2;');
+    expect(hunks[1].head).toContain('const b = 1;');
+  });
+
+  it('reports unsafe (no hunks) for malformed/unterminated markers', () => {
+    const bad = ['<<<<<<< HEAD', 'a', '=======', 'b'].join('\n'); // no closing >>>>>>>
+    expect(extractHunks(bad, 12)).toEqual({ hunks: [], safe: false });
+  });
+
+  it('splices resolved hunks back into the verbatim file (round-trip)', () => {
+    const spliced = spliceHunks(COMPLEX_CONTENT, new Map([[0, ['  return MERGED;']]]));
+    expect(spliced).toBe('function process(data: string) {\n  return MERGED;\n}');
+    expect(spliced).not.toMatch(/<<<<<<<|=======|>>>>>>>/);
+  });
+
+  it('splices multiple hunks independently', () => {
+    const spliced = spliceHunks(TWO_HUNK, new Map([[0, ['const a = 3;']], [1, ['const b = 3;']]]));
+    expect(spliced).toBe('const top = 1;\nconst a = 3;\nconst middle = 2;\nconst b = 3;\nconst bottom = 3;');
+  });
+
+  it('copies surrounding text verbatim, preserving CRLF line endings', () => {
+    const crlf = 'a\r\n<<<<<<< HEAD\r\nx\r\n=======\r\ny\r\n>>>>>>> MERGE_HEAD\r\nb\r\n';
+    const spliced = spliceHunks(crlf, new Map([[0, ['MERGED']]]));
+    expect(spliced).toBe('a\r\nMERGED\nb\r\n'); // 'a' and 'b' keep their \r; only the hunk region changed
+  });
+
+  it('throws when a conflict has no resolution provided (caller falls back)', () => {
+    expect(() => spliceHunks(COMPLEX_CONTENT, new Map())).toThrow(/no resolution/);
   });
 });
 

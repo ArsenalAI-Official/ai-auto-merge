@@ -109,7 +109,7 @@ function extractDeclaredName(line: string): string | null {
 // counts as a separator *inside* a conflict, so it never collides with a
 // Markdown heading underline in ordinary text.
 
-type Segment = { kind: 'text'; lines: string[] } | { kind: 'conflict'; head: string[]; base: string[] };
+export type Segment = { kind: 'text'; lines: string[] } | { kind: 'conflict'; head: string[]; base: string[] };
 
 const RE_START = /^<{7}(?=$|\s)/;
 const RE_ANCESTOR = /^\|{7}(?=$|\s)/;
@@ -123,7 +123,7 @@ interface ParseResult {
   malformed: boolean;
 }
 
-function parseSegments(content: string): ParseResult {
+export function parseSegments(content: string): ParseResult {
   const lines = content.split('\n');
   const segments: Segment[] = [];
   const blocks: ConflictBlock[] = [];
@@ -254,6 +254,97 @@ export function resolveImports(classified: ClassifiedConflict): string {
     const lines = [...head, ...base].map((l) => l.replace(/\r$/, '')).filter((l) => l.trim());
     return mergeImportLines(lines);
   });
+}
+
+// ─── Hunk-level resolution support ─────────────────────────────────────────────
+// The model resolves ONE conflict region at a time (with surrounding context for
+// intent) and returns only the replacement lines; we splice those back into the
+// verbatim text segments. This is the edit-not-rewrite approach (Cursor/Claude
+// Code): it removes the whole-file output-size ceiling and cuts output tokens,
+// because the untouched 99% of a large file is never regenerated. Both extract
+// and splice go through the SAME parseSegments() the splicers use, so they can
+// never disagree on where a conflict starts or ends.
+
+export interface Hunk {
+  /** 0-based position among the file's conflict blocks (matches splice order). */
+  index: number;
+  head: string[];
+  base: string[];
+  /** Verbatim lines immediately before/after the conflict, for the model's context. */
+  contextBefore: string[];
+  contextAfter: string[];
+  /** head/base rendered with standard markers — what the model is asked to resolve. */
+  markerText: string;
+}
+
+const stripCR = (l: string): string => l.replace(/\r$/, '');
+
+function renderMarkers(head: string[], base: string[]): string {
+  return [
+    '<<<<<<< HEAD (PR branch)',
+    ...head.map(stripCR),
+    '=======',
+    ...base.map(stripCR),
+    '>>>>>>> MERGE_HEAD (base branch)',
+  ].join('\n');
+}
+
+/**
+ * Split a conflicted file into individually-resolvable hunks. Returns
+ * `safe:false` (and no hunks) when the markers can't be cleanly parsed
+ * (malformed/unterminated, or no conflict blocks) — the caller must then fall
+ * back to whole-file resolution rather than risk a bad splice.
+ */
+export function extractHunks(content: string, contextLines: number): { hunks: Hunk[]; safe: boolean } {
+  const { segments, blocks, malformed } = parseSegments(content);
+  const conflictCount = segments.filter((s) => s.kind === 'conflict').length;
+  const safe = !malformed && blocks.length >= 1 && conflictCount === blocks.length;
+  if (!safe) return { hunks: [], safe: false };
+
+  const ctx = Math.max(0, contextLines);
+  const hunks: Hunk[] = [];
+  let index = 0;
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+    if (seg.kind !== 'conflict') continue;
+    const prev = segments[i - 1];
+    const next = segments[i + 1];
+    const contextBefore = prev?.kind === 'text' ? prev.lines.slice(-ctx).map(stripCR) : [];
+    const contextAfter = next?.kind === 'text' ? next.lines.slice(0, ctx).map(stripCR) : [];
+    hunks.push({
+      index,
+      head: seg.head,
+      base: seg.base,
+      contextBefore,
+      contextAfter,
+      markerText: renderMarkers(seg.head, seg.base),
+    });
+    index++;
+  }
+  return { hunks, safe: true };
+}
+
+/**
+ * Rebuild the file with each conflict region replaced by its resolved lines.
+ * Every non-conflict line is copied verbatim (so surrounding code, CRLF, and the
+ * trailing-newline state are preserved exactly). Throws if a conflict has no
+ * resolution — the caller treats that as a splice failure and falls back.
+ */
+export function spliceHunks(content: string, resolvedByIndex: Map<number, string[]>): string {
+  const { segments } = parseSegments(content);
+  const out: string[] = [];
+  let index = 0;
+  for (const seg of segments) {
+    if (seg.kind === 'text') {
+      out.push(...seg.lines);
+    } else {
+      const replacement = resolvedByIndex.get(index);
+      if (!replacement) throw new Error(`no resolution provided for hunk ${index}`);
+      out.push(...replacement);
+      index++;
+    }
+  }
+  return out.join('\n');
 }
 
 // ─── "Keep both" backstop ────────────────────────────────────────────────────

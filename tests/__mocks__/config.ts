@@ -7,6 +7,8 @@ export const config = {
   llm: {
     provider: 'anthropic' as const,
     resolutionMode: 'adaptive' as const,
+    granularity: 'auto' as 'auto' | 'hunk' | 'file',
+    hunkContextLines: 12,
   },
   anthropic: {
     apiKey: 'test-anthropic-key',
@@ -35,6 +37,8 @@ export const config = {
     maxFilesToAutoResolve: 20,
     maxFileBytes: 262_144,
     allowWorkflowFiles: false,
+    formatResolved: true,
+    postResolveTimeoutSec: 180,
     queueConcurrency: 3,
     inProcessConcurrency: 2,
     prConcurrency: 3,

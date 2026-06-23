@@ -28,6 +28,14 @@ function judgeWinnerA() {
 
 import { resolveConflicts, repairResolution } from '../src/services/conflictResolver';
 import { ConflictedFile } from '../src/types';
+import { config } from '../src/utils/config';
+
+// Hunk-level is the default. The whole-file pipeline tests below force 'file'
+// granularity in their beforeEach; this resets to the default after each test so
+// forcing never leaks between describes.
+afterEach(() => {
+  config.llm.granularity = 'auto';
+});
 
 // ─── Test fixtures ─────────────────────────────────────────────────────────────
 
@@ -120,10 +128,11 @@ describe('import-only conflict fast-path', () => {
 
 // ─── Complex conflicts: adaptive pipeline (default mode) ──────────────────────
 
-describe('complex modify-modify conflict (adaptive)', () => {
+describe('complex modify-modify conflict (adaptive, whole-file mode)', () => {
   beforeEach(() => {
     mockFinalMessage.mockReset();
     mockCreate.mockReset();
+    config.llm.granularity = 'file'; // exercise the whole-file pipeline explicitly
   });
 
   it('ships a single verified proposal with ONE Opus call (the efficiency win)', async () => {
@@ -186,10 +195,11 @@ describe('complex modify-modify conflict (adaptive)', () => {
   });
 });
 
-describe('edge-case guards', () => {
+describe('edge-case guards (whole-file mode)', () => {
   beforeEach(() => {
     mockFinalMessage.mockReset();
     mockCreate.mockReset();
+    config.llm.granularity = 'file'; // delete/truncation/empty are whole-file concerns
   });
 
   it('flags binary/non-text files and never calls the model', async () => {
@@ -292,8 +302,11 @@ describe('lockfile conflicts', () => {
   });
 });
 
-describe('oversized files', () => {
-  beforeEach(() => mockFinalMessage.mockReset());
+describe('oversized files (whole-file mode)', () => {
+  beforeEach(() => {
+    mockFinalMessage.mockReset();
+    config.llm.granularity = 'file'; // the output-ceiling gate only applies to whole-file
+  });
 
   it('skips AI resolution above MAX_FILE_BYTES and flags for review', async () => {
     const bigBody = 'const filler = 1;\n'.repeat(20_000); // ~360 KB > 256 KB default cap
@@ -317,6 +330,143 @@ describe('oversized files', () => {
     expect(mockFinalMessage).not.toHaveBeenCalled();
     expect(results[0].method).toBe('oversize');
     expect(results[0].explanation).toMatch(/regenerate|output tokens/i);
+  });
+});
+
+// ─── Hunk-level resolution (default granularity = 'auto') ─────────────────────
+// Resolve only the conflict region(s) and splice into the verbatim rest of the
+// file — the edit-not-rewrite approach. No whole-file output ceiling, far fewer
+// output tokens, and large files with small conflicts now resolve.
+
+const TWO_HUNK_FILE: ConflictedFile = {
+  path: 'src/two.ts',
+  content: [
+    'const top = 1;',
+    '<<<<<<< HEAD',
+    'const a = "pr";',
+    '=======',
+    'const a = "base";',
+    '>>>>>>> MERGE_HEAD',
+    'const middle = 2;',
+    '<<<<<<< HEAD',
+    'const b = "pr2";',
+    '=======',
+    'const b = "base2";',
+    '>>>>>>> MERGE_HEAD',
+    'const bottom = 3;',
+  ].join('\n'),
+};
+
+describe('hunk-level resolution (default mode)', () => {
+  beforeEach(() => {
+    mockFinalMessage.mockReset();
+    mockCreate.mockReset();
+    mockStream.mockClear();
+    config.llm.granularity = 'auto';
+  });
+
+  it('splices a single resolved hunk into the verbatim surrounding code', async () => {
+    mockFinalMessage.mockResolvedValue(makeClaudeResponse({ resolved_content: 'X' }));
+    mockCreate.mockResolvedValue(verifyOk());
+
+    const results = await resolveConflicts([COMPLEX_FILE], 'feat', null, 'feat', 'main');
+
+    expect(mockFinalMessage).toHaveBeenCalledTimes(1); // one tiny proposal for the one hunk
+    expect(mockCreate).toHaveBeenCalledTimes(1); // one cheap verify
+    expect(results[0].method).toBe('ai_hunk');
+    expect(results[0].needsReview).toBe(false);
+    // surrounding lines verbatim, conflict region replaced by the resolved hunk
+    expect(results[0].content).toBe('function process(x: string) {\nX\n}');
+    expect(results[0].content).not.toMatch(/<<<<<<<|=======|>>>>>>>/);
+  });
+
+  it('resolves every hunk in a multi-conflict file and splices them all', async () => {
+    mockFinalMessage.mockResolvedValue(makeClaudeResponse({ resolved_content: 'const merged = "ok";' }));
+    mockCreate.mockResolvedValue(verifyOk());
+
+    const results = await resolveConflicts([TWO_HUNK_FILE], 'feat', null, 'feat', 'main');
+
+    expect(mockFinalMessage).toHaveBeenCalledTimes(2); // one proposal per hunk
+    expect(results[0].method).toBe('ai_hunk');
+    expect(results[0].needsReview).toBe(false);
+    expect(results[0].content).toBe(
+      'const top = 1;\nconst merged = "ok";\nconst middle = 2;\nconst merged = "ok";\nconst bottom = 3;'
+    );
+    expect(results[0].content).not.toMatch(/<<<<<<<|=======|>>>>>>>/);
+  });
+
+  it('resolves a large file that whole-file mode would reject as oversize (the big-file fix)', async () => {
+    // ~210 KB: under MAX_FILE_BYTES but FAR over any whole-file output ceiling.
+    // Whole-file mode flags it 'oversize'; hunk mode resolves the small conflict.
+    const body = 'const x = 1;\n'.repeat(16_500);
+    const big: ConflictedFile = { path: 'src/huge2.ts', content: body + COMPLEX_FILE.content };
+    mockFinalMessage.mockResolvedValue(makeClaudeResponse({ resolved_content: 'RESOLVED_HUNK' }));
+    mockCreate.mockResolvedValue(verifyOk());
+
+    const results = await resolveConflicts([big], 'feat', null, 'feat', 'main');
+
+    expect(results[0].method).toBe('ai_hunk'); // resolved, NOT 'oversize'
+    expect(results[0].needsReview).toBe(false);
+    expect(results[0].content).toContain('RESOLVED_HUNK');
+    expect(results[0].content).not.toMatch(/<<<<<<<|>>>>>>>/);
+    // the token win: a tiny request despite a 210 KB file
+    const maxTokens = mockStream.mock.calls[0][0]?.max_tokens ?? Infinity;
+    expect(maxTokens).toBeLessThanOrEqual(8_192);
+  });
+
+  it('keep-both guard still catches a hunk that drops the PR side', async () => {
+    const MULTILINE: ConflictedFile = {
+      path: 'src/feature.ts',
+      content: [
+        'function feature() {',
+        '<<<<<<< HEAD',
+        '  const a = computeA();',
+        '  const b = computeB();',
+        '  return a + b;',
+        '=======',
+        '  return legacy();',
+        '>>>>>>> MERGE_HEAD',
+        '}',
+      ].join('\n'),
+    };
+    // Model returns the base-only hunk, dropping the PR's distinctive lines.
+    mockFinalMessage.mockResolvedValue(makeClaudeResponse({ resolved_content: '  return legacy();' }));
+    mockCreate.mockResolvedValue(verifyOk()); // even a fooled verifier can't get past the deterministic guard
+
+    const results = await resolveConflicts([MULTILINE], 'feat', null, 'feat', 'main');
+
+    expect(results[0].needsReview).toBe(true);
+    expect(results[0].explanation).toMatch(/keep-both guard/);
+  });
+
+  it('flags the file for review when a hunk itself needs review', async () => {
+    mockFinalMessage.mockResolvedValue(makeClaudeResponse({ resolved_content: 'partial', needs_review: true }));
+    const results = await resolveConflicts([COMPLEX_FILE], 'feat', null, 'feat', 'main');
+    expect(results[0].method).toBe('ai_hunk_review');
+    expect(results[0].needsReview).toBe(true);
+  });
+
+  it('rejects a hunk whose replacement still contains a conflict marker', async () => {
+    mockFinalMessage.mockResolvedValue(makeClaudeResponse({ resolved_content: 'foo\n<<<<<<< HEAD\nbar' }));
+    const results = await resolveConflicts([COMPLEX_FILE], 'feat', null, 'feat', 'main');
+    expect(results[0].needsReview).toBe(true);
+    expect(results[0].method).toBe('ai_hunk_review');
+    expect(results[0].content).not.toContain('foo'); // the bad hunk is never spliced in
+  });
+
+  it('falls back to whole-file resolution when markers cannot be cleanly parsed', async () => {
+    // Unterminated conflict (no closing >>>>>>>) → unsafe to splice → whole-file.
+    const malformed: ConflictedFile = {
+      path: 'src/bad.ts',
+      content: ['function f() {', '<<<<<<< HEAD', '  return 1;', '=======', '  return 2;'].join('\n'),
+    };
+    mockFinalMessage.mockResolvedValue(makeClaudeResponse({ resolved_content: 'function f() {\n  return 1 + 2;\n}' }));
+    mockCreate.mockResolvedValue(verifyOk());
+
+    const results = await resolveConflicts([malformed], 'feat', null, 'feat', 'main');
+
+    expect(results[0].method).toBe('ai_verified'); // whole-file path ran, not hunk
+    expect(results[0].content).toBe('function f() {\n  return 1 + 2;\n}');
   });
 });
 

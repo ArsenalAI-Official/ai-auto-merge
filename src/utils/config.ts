@@ -77,6 +77,20 @@ export const config = {
      * thorough: always run both strategies + judge (highest assurance, ~2x cost).
      */
     resolutionMode: (process.env.RESOLUTION_MODE || 'adaptive') as 'adaptive' | 'thorough',
+    /**
+     * How much of a conflicted file is sent to the model:
+     *  - 'auto' (default): resolve ONLY each conflict hunk and splice the result
+     *    back into the untouched rest of the file — the same edit-not-rewrite
+     *    approach Cursor/Claude Code use. Removes the whole-file output-size
+     *    ceiling (large files with small conflicts now resolve) and slashes
+     *    output tokens. Falls back to whole-file automatically when a file has no
+     *    cleanly-parseable conflict blocks (diff3/malformed) or a splice fails.
+     *  - 'hunk': always attempt hunk-level (same automatic fallback).
+     *  - 'file': always regenerate the whole file (legacy behavior).
+     */
+    granularity: (process.env.RESOLUTION_GRANULARITY || 'auto') as 'auto' | 'hunk' | 'file',
+    /** Lines of surrounding context sent with each conflict hunk (each side). */
+    hunkContextLines: intEnv('HUNK_CONTEXT_LINES', 12),
   },
   anthropic: {
     apiKey: providerKey('anthropic', 'ANTHROPIC_API_KEY'),
@@ -131,6 +145,15 @@ export const config = {
      * you granted the App that permission (and accept a bot editing CI).
      */
     allowWorkflowFiles: process.env.ALLOW_WORKFLOW_FILES === 'true',
+    /**
+     * Auto-format resolved files with the bundled Prettier (Option 1) before
+     * committing. Safe: only reformats files the bot resolved, re-validates the
+     * result, and keeps the original on any error. Default on; per-repo
+     * `.auto-merge.yml` `format:` overrides. Set FORMAT_RESOLVED=false to disable.
+     */
+    formatResolved: process.env.FORMAT_RESOLVED !== 'false',
+    /** Default ceiling (seconds) for a repo's postResolve command; per-repo config can lower/raise within bounds. */
+    postResolveTimeoutSec: intEnv('POST_RESOLVE_TIMEOUT_SEC', 180),
     /** BullMQ worker concurrency when REDIS_URL is set. */
     queueConcurrency: intEnv('QUEUE_CONCURRENCY', 3),
     /** Concurrent PR-merge events processed in-process when Redis is absent. */
