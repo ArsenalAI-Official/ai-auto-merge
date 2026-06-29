@@ -318,6 +318,62 @@ async function testPostProcessing() {
   check('failing hook reports not-ok (commit would be skipped)', fail.ok === false && /exited 7/.test(fail.error || ''));
 }
 
+// ─── Scenario F: partial-merge guard (the PR #64 regression) ────────────────────
+// When some conflicts resolve confidently but another is flagged for review, the
+// flagged file stays UNMERGED in the index — and a git merge commit cannot be
+// created in that state. This reproduces it with real git and asserts
+// commitAndPush refuses with a clear, file-named error instead of crashing
+// mid-commit with git's cryptic "unmerged files" message (what broke PR #64).
+async function testPartialMergeGuard() {
+  section('F. Partial-merge guard — refuse to commit with files still unmerged (#64 regression)');
+
+  const bare = path.join(tmpRoot, 'origin-partial.git');
+  const seed = path.join(tmpRoot, 'seed-partial');
+  fs.mkdirSync(bare);
+  git(tmpRoot, 'init', '--bare', '-b', 'main', bare);
+  git(tmpRoot, 'clone', bare, seed);
+  git(seed, 'config', 'user.email', 't@t');
+  git(seed, 'config', 'user.name', 't');
+
+  const write = (f, v) => fs.writeFileSync(path.join(seed, f), v);
+  write('a.txt', 'value = 1\n');
+  write('b.txt', 'value = 1\n');
+  git(seed, 'add', '-A'); git(seed, 'commit', '-m', 'base'); git(seed, 'push', 'origin', 'main');
+
+  git(seed, 'checkout', '-b', 'pr-2');
+  write('a.txt', 'value = "pr"\n'); write('b.txt', 'value = "pr"\n');
+  git(seed, 'commit', '-am', 'pr'); git(seed, 'push', 'origin', 'pr-2');
+
+  git(seed, 'checkout', 'main');
+  write('a.txt', 'value = "main"\n'); write('b.txt', 'value = "main"\n');
+  git(seed, 'commit', '-am', 'main'); git(seed, 'push', 'origin', 'main');
+
+  const fileUrl = `file://${bare}`;
+  const ctx = await gitOps.cloneRepo(fileUrl, 'unused-token', 'pr-2');
+  const merge = await gitOps.fetchAndMergeBase(ctx, 'main', 'unused-token', fileUrl);
+  check('two real conflicts detected', merge.hasConflicts && merge.conflictedFiles.length === 2,
+    `(files=${merge.conflictedFiles})`);
+
+  // Resolve ONLY a.txt — simulate b.txt being flagged for review (left unmerged).
+  await gitOps.applyResolutions(ctx, [{ path: 'a.txt', content: 'value = "pr+main"\n' }]);
+
+  let threw = null;
+  try {
+    await gitOps.commitAndPush(ctx, 'fix: partial', 'pr-2', fileUrl, 'unused-token');
+  } catch (e) {
+    threw = e;
+  }
+  check('commitAndPush refused the partial merge (did not crash or push)', threw !== null);
+  check('error clearly names the unmerged file', threw !== null && /unmerged/i.test(threw.message) && threw.message.includes('b.txt'),
+    `(msg=${threw ? threw.message.split('\n')[0] : 'none'})`);
+
+  // The safety valve still works: aborting clears the conflicted state.
+  await gitOps.abortMerge(ctx);
+  const status = git(ctx.dir, 'status', '--porcelain').trim();
+  check('abortMerge clears the unmerged state', status === '', `(status=${JSON.stringify(status)})`);
+  await ctx.cleanup();
+}
+
 try {
   console.log('ai-auto-merge — local end-to-end harness (real git, no GitHub App, no API key)');
   await testGitOpsPlumbing();
@@ -325,6 +381,7 @@ try {
   testClassifierRouting();
   await testHunkSpliceRealGit();
   await testPostProcessing();
+  await testPartialMergeGuard();
   section('Result');
   console.log(`  ${pass} passed, ${fail} failed`);
 } finally {

@@ -291,13 +291,24 @@ async function resolveWithRun(
       return;
     }
 
-    if (autoApply.length === 0) {
+    // A git merge commit is atomic: git refuses to commit while ANY conflicted
+    // file is still unmerged. So we only complete and push the merge when EVERY
+    // conflicted file was confidently auto-applied. If any file needs review (or
+    // was excluded by config), pushing a partial merge would force us to either
+    // commit conflict markers or pick one side and silently drop the other —
+    // both unacceptable — so we abort, leave the branch untouched, and hand the
+    // whole PR to a human, including a preview of the resolutions we could make.
+    const unresolved = needsReview.length + excluded.length;
+    if (unresolved > 0) {
       await abortMerge(ctx);
-      await createCommitStatus(octokit, pr.repoOwner, pr.repoName, pr.headSha, 'failure',
-        'AI could not confidently resolve conflicts');
+      const status =
+        autoApply.length === 0
+          ? 'AI could not confidently resolve conflicts'
+          : `Resolved ${autoApply.length}/${conflictedFiles.length} files; ${unresolved} still need manual review (cannot push a partial merge)`;
+      await createCommitStatus(octokit, pr.repoOwner, pr.repoName, pr.headSha, 'failure', status.slice(0, 140));
       await postComment(octokit, pr.repoOwner, pr.repoName, pr.number,
-        buildReviewRequiredComment(resolvedFiles, trigger, run.usage));
-      finishRun(run, 'review_required');
+        buildReviewRequiredComment(resolvedFiles, trigger, run.usage, excluded.map((f) => f.path)));
+      finishRun(run, 'review_required', status);
       return;
     }
 

@@ -7,8 +7,23 @@
 jest.mock('../src/services/github');
 jest.mock('../src/services/gitOps');
 jest.mock('../src/services/conflictResolver');
+// Factory mocks (not auto-mocks): loading the real postProcess pulls in
+// Prettier's internal dynamic import(), which jest's VM rejects.
+jest.mock('../src/services/postProcess', () => ({
+  formatResolutions: jest.fn(),
+  runPostResolveHook: jest.fn(),
+}));
+jest.mock('../src/services/syntaxCheck', () => ({
+  checkSyntax: jest.fn(),
+}));
 
-import { ResolvedFile } from '../src/types';
+import { ResolvedFile, ManualResolveEvent } from '../src/types';
+import { processManualResolve } from '../src/services/prProcessor';
+import * as github from '../src/services/github';
+import * as gitOps from '../src/services/gitOps';
+import * as conflictResolver from '../src/services/conflictResolver';
+import * as postProcess from '../src/services/postProcess';
+import * as syntaxCheck from '../src/services/syntaxCheck';
 
 // Extract classifyResolutions by importing internals via a helper.
 // We test it by driving processMergedPR and inspecting mock call arguments,
@@ -96,5 +111,82 @@ describe('confidence threshold classification', () => {
     const { autoApply, needsReview } = classifyResolutions([], 'high');
     expect(autoApply).toHaveLength(0);
     expect(needsReview).toHaveLength(0);
+  });
+});
+
+// ─── Partial-resolution policy (the PR #64 regression) ───────────────────────────
+// When some conflicts resolve confidently but others are flagged, the flagged
+// files stay unmerged and a merge commit cannot be created. The pipeline must
+// abort and hand the PR to a human — never attempt the (impossible) partial
+// commit. This drives the real processManualResolve flow with mocked I/O.
+describe('all-or-nothing merge policy', () => {
+  const mock = (fn: unknown) => fn as jest.Mock;
+
+  function setup(resolved: ResolvedFile[]) {
+    jest.clearAllMocks();
+    mock(github.getInstallationOctokit).mockResolvedValue({}); // getRepoConfig falls back to defaults
+    mock(github.getPRByNumber).mockResolvedValue({
+      pr: {
+        number: 64, title: 'PR', body: '', headRef: 'feature', baseRef: 'main',
+        headSha: 'sha', url: 'http://x', repoOwner: 'o', repoName: 'r', installationId: 1,
+      },
+      state: 'open',
+      isFork: false,
+    });
+    mock(github.getInstallationToken).mockResolvedValue('tok');
+    mock(github.getPRDiff).mockResolvedValue('');
+    mock(github.createCommitStatus).mockResolvedValue(undefined);
+    mock(github.postComment).mockResolvedValue(undefined);
+    mock(github.enableAutoMerge).mockResolvedValue(false);
+
+    mock(gitOps.prepareConflictWorkspace).mockResolvedValue({
+      ctx: { dir: '/tmp/fake', git: {}, cleanup: jest.fn().mockResolvedValue(undefined) },
+      conflictedFiles: resolved.map((f) => ({ path: f.path, content: f.content })),
+      remoteUrl: 'url',
+    });
+    mock(gitOps.applyResolutions).mockResolvedValue(undefined);
+    mock(gitOps.commitAndPush).mockResolvedValue('newsha');
+    mock(gitOps.abortMerge).mockResolvedValue(undefined);
+
+    mock(conflictResolver.resolveConflicts).mockResolvedValue(resolved);
+    mock(postProcess.formatResolutions).mockResolvedValue(undefined);
+    mock(postProcess.runPostResolveHook).mockResolvedValue({ ok: true });
+    mock(syntaxCheck.checkSyntax).mockResolvedValue({ valid: true });
+  }
+
+  const event: ManualResolveEvent = {
+    prNumber: 64, repoOwner: 'o', repoName: 'r', installationId: 1,
+    requestedBy: 'dev', requestedAt: '2026-06-26T00:00:00Z',
+  };
+
+  it('aborts (does NOT commit) when one file resolves but another needs review — the #64 case', async () => {
+    setup([
+      makeFile('backend/scripts/export_openapi.py', 'high', false),
+      makeFile('backend/routers/auth.py', 'low', true), // preservation guard flagged it
+    ]);
+
+    await processManualResolve(event);
+
+    // The crux: never attempt the impossible partial commit.
+    expect(gitOps.commitAndPush).not.toHaveBeenCalled();
+    expect(gitOps.applyResolutions).not.toHaveBeenCalled();
+    // Instead, abort the merge and tell the human.
+    expect(gitOps.abortMerge).toHaveBeenCalled();
+    const comment = mock(github.postComment).mock.calls.at(-1)?.[4] as string;
+    expect(comment).toMatch(/Manual Review Required/);
+    expect(comment).toContain('auth.py');
+  });
+
+  it('commits when EVERY conflicted file resolves confidently', async () => {
+    setup([
+      makeFile('a.ts', 'high', false),
+      makeFile('b.ts', 'high', false),
+    ]);
+
+    await processManualResolve(event);
+
+    expect(gitOps.applyResolutions).toHaveBeenCalled();
+    expect(gitOps.commitAndPush).toHaveBeenCalled();
+    expect(gitOps.abortMerge).not.toHaveBeenCalled();
   });
 });
