@@ -223,6 +223,18 @@ export async function commitAndPush(
   if (!isSafeRefName(branch)) {
     throw new Error(`Refusing to push to suspicious branch name "${branch}"`);
   }
+  // Defense in depth: a git merge commit cannot be created while any path is
+  // still unmerged. The caller only reaches here once every conflicted file has
+  // been resolved and staged, but assert it so a future regression fails loudly
+  // and clearly here instead of with git's cryptic "unmerged files" error.
+  const unmerged = (await ctx.git.raw(['diff', '--name-only', '--diff-filter=U'])).trim();
+  if (unmerged) {
+    const files = unmerged.split('\n');
+    throw new Error(
+      `Refusing to commit: ${files.length} conflicted file(s) still unmerged (${files.join(', ')}). ` +
+        `A merge cannot be committed partially — resolve or abort first.`
+    );
+  }
   // Auth is already set via http.extraHeader in the repo config; --no-verify
   // skips any client-side hooks.
   await ctx.git.commit(message, { '--no-verify': null });

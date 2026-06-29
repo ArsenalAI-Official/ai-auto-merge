@@ -120,23 +120,48 @@ export function buildDryRunComment(
 export function buildReviewRequiredComment(
   resolvedFiles: ResolvedFile[],
   trigger: TriggerInfo,
-  usage?: RunUsage
+  usage?: RunUsage,
+  excludedPaths: string[] = []
 ): string {
-  return [
+  const needsReview = resolvedFiles.filter((f) => f.needsReview);
+  const resolvable = resolvedFiles.filter((f) => !f.needsReview);
+
+  const lines: string[] = [
     `## 🤖 AI Merge Conflict Resolution — Manual Review Required`,
     ``,
-    `Attempted to resolve conflicts ${describeTrigger(trigger)}, but confidence was too low to auto-apply.`,
+    `Attempted to resolve conflicts ${describeTrigger(trigger)}. A merge can only be pushed once **every** conflicted file resolves confidently, so nothing was pushed — the items below need a human.`,
     ``,
-    `### Files requiring manual resolution:`,
+    `### Files requiring manual resolution`,
     ``,
-    ...resolvedFiles.map((f) => `- \`${f.path}\` *(${f.confidence})* — ${f.explanation}`),
+  ];
+
+  const blockers = [
+    ...needsReview.map((f) => `- \`${f.path}\` *(${f.confidence})* — ${f.explanation}`),
+    ...excludedPaths.map((p) => `- \`${p}\` — excluded by \`.auto-merge.yml\` (never auto-resolved)`),
+  ];
+  // Fallback so the section is never empty (e.g. defensive callers).
+  lines.push(...(blockers.length ? blockers : resolvedFiles.map((f) => `- \`${f.path}\` *(${f.confidence})* — ${f.explanation}`)));
+
+  if (resolvable.length) {
+    lines.push(
+      ``,
+      `### Ready, but held back`,
+      ``,
+      `These resolved cleanly; they will apply once the file(s) above are sorted (a merge can't be completed partially):`,
+      ``,
+      ...resolvable.map((f) => `- \`${f.path}\` *(${f.confidence})* — ${f.explanation}`)
+    );
+  }
+
+  lines.push(
     ``,
-    `Please resolve these conflicts manually and push to this branch. You can retry with \`/ai-merge resolve\` after improving the PR description (Claude uses it for intent).`,
+    `Resolve the flagged file(s) and push to this branch. After improving the PR description (Claude uses it for intent), you can retry the whole PR with \`/ai-merge resolve\`.`,
     ``,
     '---',
     FOOTER_LINK,
-    ...usageLine(usage),
-  ].join('\n');
+    ...usageLine(usage)
+  );
+  return lines.join('\n');
 }
 
 export function buildSkippedComment(reason: string, trigger: TriggerInfo): string {
